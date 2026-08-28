@@ -1,0 +1,13 @@
+[package]
+name = "sound-monitor"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["src-tauri"]
+resolver = "2"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serialport = { version = "4", default-features = false }

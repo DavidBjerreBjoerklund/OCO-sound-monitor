@@ -1,0 +1,606 @@
+use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
+use sound_monitor::measurement::Measurement;
+use sound_monitor::session::{Marker, Session, SessionDevice, SESSION_FORMAT_VERSION};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartSessionRequest {
+    pub title: String,
+    pub event_type: String,
+    pub event_date: NaiveDate,
+    pub responsible_engineer_name: Option<String>,
+    pub devices: Vec<SessionDevice>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: String,
+    pub event_type: String,
+    pub event_date: NaiveDate,
+    pub started: DateTime<FixedOffset>,
+    pub ended: Option<DateTime<FixedOffset>>,
+    pub responsible_engineer_name: Option<String>,
+    pub device_count: usize,
+    pub sample_count: usize,
+    pub minimum_db: Option<f32>,
+    pub maximum_db: Option<f32>,
+    pub average_db: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDetail {
+    pub session: Session,
+    pub measurements: Vec<Measurement>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddMarkerRequest {
+    pub label: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResult {
+    pub directory: String,
+    pub files: Vec<String>,
+}
+
+struct ActiveSession {
+    directory: PathBuf,
+    session: Session,
+    writers: HashMap<String, BufWriter<File>>,
+}
+
+#[derive(Clone)]
+pub struct SessionStore {
+    root: PathBuf,
+    active: Arc<Mutex<Option<ActiveSession>>>,
+}
+
+impl SessionStore {
+    pub fn new(root: PathBuf) -> Result<Self, String> {
+        fs::create_dir_all(&root)
+            .map_err(|error| format!("Kunne ikke oprette sessionsmappe: {error}"))?;
+        Ok(Self {
+            root,
+            active: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn start(&self, request: StartSessionRequest) -> Result<Session, String> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| "Sessionslageret er låst.".to_owned())?;
+        if active.is_some() {
+            return Err("Der er allerede en aktiv session.".to_owned());
+        }
+
+        let started = Local::now().fixed_offset();
+        let id = format!(
+            "{}-{}",
+            started.format("%Y%m%d-%H%M%S"),
+            started.timestamp_subsec_millis()
+        );
+        let directory = self.root.join(started.year().to_string()).join(&id);
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("Kunne ikke oprette sessionen: {error}"))?;
+
+        let session = Session {
+            format_version: SESSION_FORMAT_VERSION,
+            id,
+            title: request.title.trim().to_owned(),
+            event_type: request.event_type,
+            event_date: request.event_date,
+            started,
+            ended: None,
+            responsible_engineer_id: None,
+            responsible_engineer_name: request
+                .responsible_engineer_name
+                .filter(|name| !name.trim().is_empty()),
+            audio_crew: Vec::new(),
+            devices: request.devices,
+            markers: Vec::new(),
+            notes: None,
+        };
+        write_session_metadata(&directory, &session)?;
+        *active = Some(ActiveSession {
+            directory,
+            session: session.clone(),
+            writers: HashMap::new(),
+        });
+        Ok(session)
+    }
+
+    pub fn stop(&self) -> Result<Session, String> {
+        let mut guard = self
+            .active
+            .lock()
+            .map_err(|_| "Sessionslageret er låst.".to_owned())?;
+        let Some(mut active) = guard.take() else {
+            return Err("Der er ingen aktiv session.".to_owned());
+        };
+        for writer in active.writers.values_mut() {
+            writer
+                .flush()
+                .map_err(|error| format!("Kunne ikke afslutte målefilen: {error}"))?;
+        }
+        active.session.ended = Some(Local::now().fixed_offset());
+        write_session_metadata(&active.directory, &active.session)?;
+        Ok(active.session)
+    }
+
+    pub fn record(&self, measurement: &Measurement) -> Result<(), String> {
+        let mut guard = self
+            .active
+            .lock()
+            .map_err(|_| "Sessionslageret er låst.".to_owned())?;
+        let Some(active) = guard.as_mut() else {
+            return Ok(());
+        };
+        if !active.writers.contains_key(&measurement.device_id) {
+            let filename = measurement_filename(&measurement.device_id);
+            let path = active.directory.join(filename);
+            let is_empty =
+                !path.exists() || path.metadata().map(|meta| meta.len() == 0).unwrap_or(true);
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|error| format!("Kunne ikke åbne målefilen: {error}"))?;
+            let mut writer = BufWriter::new(file);
+            if is_empty {
+                writer
+                    .write_all(b"timestamp,deviceId,levelDb,weighting,response,raw\n")
+                    .map_err(|error| format!("Kunne ikke skrive målefilens header: {error}"))?;
+            }
+            active.writers.insert(measurement.device_id.clone(), writer);
+        }
+        let writer = active
+            .writers
+            .get_mut(&measurement.device_id)
+            .expect("writer was inserted");
+        writeln!(
+            writer,
+            "{},{},{},{},{},{}",
+            csv_field(&measurement.timestamp.to_rfc3339()),
+            csv_field(&measurement.device_id),
+            measurement.level_db,
+            csv_field(
+                &measurement
+                    .weighting
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            ),
+            csv_field(
+                &measurement
+                    .response
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            ),
+            csv_field(&measurement.raw),
+        )
+        .map_err(|error| format!("Kunne ikke gemme målingen: {error}"))?;
+        writer
+            .flush()
+            .map_err(|error| format!("Kunne ikke synkronisere målingen: {error}"))
+    }
+
+    pub fn add_marker(&self, request: AddMarkerRequest) -> Result<Marker, String> {
+        let label = request.label.trim();
+        if label.is_empty() {
+            return Err("Markøren skal have et navn.".to_owned());
+        }
+        let mut guard = self
+            .active
+            .lock()
+            .map_err(|_| "Sessionslageret er låst.".to_owned())?;
+        let active = guard
+            .as_mut()
+            .ok_or_else(|| "Markører kan kun tilføjes til en aktiv session.".to_owned())?;
+        let timestamp = Local::now().fixed_offset();
+        let marker = Marker {
+            id: format!("marker-{}", timestamp.timestamp_millis()),
+            session_id: active.session.id.clone(),
+            timestamp,
+            label: label.to_owned(),
+            note: request.note.filter(|note| !note.trim().is_empty()),
+        };
+        active.session.markers.push(marker.clone());
+        write_session_metadata(&active.directory, &active.session)?;
+        Ok(marker)
+    }
+
+    pub fn list(&self) -> Result<Vec<SessionSummary>, String> {
+        let mut summaries = Vec::new();
+        for directory in session_directories(&self.root)? {
+            let session = read_session_metadata(&directory)?;
+            let measurements = read_measurements(&directory)?;
+            summaries.push(summarize(&session, &measurements));
+        }
+        summaries.sort_by(|left, right| right.started.cmp(&left.started));
+        Ok(summaries)
+    }
+
+    pub fn load(&self, id: &str) -> Result<SessionDetail, String> {
+        let directory = session_directories(&self.root)?
+            .into_iter()
+            .find(|directory| directory.file_name().and_then(|name| name.to_str()) == Some(id))
+            .ok_or_else(|| format!("Sessionen blev ikke fundet: {id}"))?;
+        Ok(SessionDetail {
+            session: read_session_metadata(&directory)?,
+            measurements: read_measurements(&directory)?,
+        })
+    }
+
+    pub fn delete(&self, id: &str) -> Result<(), String> {
+        let active_id = self
+            .active
+            .lock()
+            .map_err(|_| "Sessionslageret er låst.".to_owned())?
+            .as_ref()
+            .map(|active| active.session.id.clone());
+        if active_id.as_deref() == Some(id) {
+            return Err("En aktiv session kan ikke slettes.".to_owned());
+        }
+
+        let directory = session_directories(&self.root)?
+            .into_iter()
+            .find(|directory| directory.file_name().and_then(|name| name.to_str()) == Some(id))
+            .ok_or_else(|| format!("Sessionen blev ikke fundet: {id}"))?;
+        fs::remove_dir_all(directory)
+            .map_err(|error| format!("Kunne ikke slette sessionen: {error}"))
+    }
+
+    pub fn export(&self, id: &str) -> Result<ExportResult, String> {
+        let detail = self.load(id)?;
+        let stamp = Local::now().format("%Y%m%d-%H%M%S");
+        let directory = self
+            .root
+            .parent()
+            .unwrap_or(&self.root)
+            .join("Exports")
+            .join(format!("{}-{stamp}", detail.session.id));
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("Kunne ikke oprette eksportmappen: {error}"))?;
+
+        write_json_file(&directory.join("session.json"), &detail.session)?;
+        write_measurement_export(&directory.join("measurements.csv"), &detail.measurements)?;
+        write_marker_export(&directory.join("markers.csv"), &detail.session.markers)?;
+        Ok(ExportResult {
+            directory: directory.display().to_string(),
+            files: vec![
+                "session.json".to_owned(),
+                "measurements.csv".to_owned(),
+                "markers.csv".to_owned(),
+            ],
+        })
+    }
+}
+
+fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let payload = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("Kunne ikke serialisere eksporten: {error}"))?;
+    fs::write(path, payload).map_err(|error| format!("Kunne ikke skrive eksporten: {error}"))
+}
+
+fn write_measurement_export(path: &Path, measurements: &[Measurement]) -> Result<(), String> {
+    let mut writer = BufWriter::new(
+        File::create(path).map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?,
+    );
+    writer
+        .write_all(b"timestamp,deviceId,levelDb,weighting,response,raw\n")
+        .map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?;
+    for measurement in measurements {
+        writeln!(
+            writer,
+            "{},{},{},{},{},{}",
+            csv_field(&measurement.timestamp.to_rfc3339()),
+            csv_field(&measurement.device_id),
+            measurement.level_db,
+            csv_field(
+                &measurement
+                    .weighting
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            ),
+            csv_field(
+                &measurement
+                    .response
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            ),
+            csv_field(&measurement.raw),
+        )
+        .map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?;
+    }
+    writer
+        .flush()
+        .map_err(|error| format!("Kunne ikke afslutte måleeksporten: {error}"))
+}
+
+fn write_marker_export(path: &Path, markers: &[Marker]) -> Result<(), String> {
+    let mut writer = BufWriter::new(
+        File::create(path)
+            .map_err(|error| format!("Kunne ikke skrive markøreksporten: {error}"))?,
+    );
+    writer
+        .write_all(b"id,sessionId,timestamp,label,note\n")
+        .map_err(|error| format!("Kunne ikke skrive markøreksporten: {error}"))?;
+    for marker in markers {
+        writeln!(
+            writer,
+            "{},{},{},{},{}",
+            csv_field(&marker.id),
+            csv_field(&marker.session_id),
+            csv_field(&marker.timestamp.to_rfc3339()),
+            csv_field(&marker.label),
+            csv_field(marker.note.as_deref().unwrap_or_default()),
+        )
+        .map_err(|error| format!("Kunne ikke skrive markøreksporten: {error}"))?;
+    }
+    writer
+        .flush()
+        .map_err(|error| format!("Kunne ikke afslutte markøreksporten: {error}"))
+}
+
+fn write_session_metadata(directory: &Path, session: &Session) -> Result<(), String> {
+    let payload = serde_json::to_vec_pretty(session)
+        .map_err(|error| format!("Kunne ikke serialisere sessionen: {error}"))?;
+    let temporary = directory.join("session.json.tmp");
+    let destination = directory.join("session.json");
+    let mut file = File::create(&temporary)
+        .map_err(|error| format!("Kunne ikke skrive sessionen: {error}"))?;
+    file.write_all(&payload)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("Kunne ikke synkronisere sessionen: {error}"))?;
+    if destination.exists() {
+        fs::remove_file(&destination)
+            .map_err(|error| format!("Kunne ikke opdatere sessionen: {error}"))?;
+    }
+    fs::rename(temporary, destination)
+        .map_err(|error| format!("Kunne ikke færdiggøre sessionen: {error}"))
+}
+
+fn read_session_metadata(directory: &Path) -> Result<Session, String> {
+    let payload = fs::read(directory.join("session.json"))
+        .map_err(|error| format!("Kunne ikke læse sessionen: {error}"))?;
+    serde_json::from_slice(&payload).map_err(|error| format!("Ugyldig session: {error}"))
+}
+
+fn session_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut result = Vec::new();
+    let years =
+        fs::read_dir(root).map_err(|error| format!("Kunne ikke læse sessionsarkivet: {error}"))?;
+    for year in years.flatten().filter(|entry| entry.path().is_dir()) {
+        if let Ok(entries) = fs::read_dir(year.path()) {
+            result.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.join("session.json").is_file()),
+            );
+        }
+    }
+    Ok(result)
+}
+
+fn read_measurements(directory: &Path) -> Result<Vec<Measurement>, String> {
+    let mut measurements = Vec::new();
+    let entries =
+        fs::read_dir(directory).map_err(|error| format!("Kunne ikke læse måledata: {error}"))?;
+    for path in entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("csv"))
+    {
+        let file =
+            File::open(path).map_err(|error| format!("Kunne ikke læse målefilen: {error}"))?;
+        for line in BufReader::new(file).lines().skip(1) {
+            let line = line.map_err(|error| format!("Kunne ikke læse en måling: {error}"))?;
+            let fields = parse_csv_line(&line)?;
+            if fields.len() != 6 {
+                continue;
+            }
+            measurements.push(Measurement {
+                timestamp: DateTime::parse_from_rfc3339(&fields[0])
+                    .map_err(|error| format!("Ugyldigt måletidspunkt: {error}"))?
+                    .with_timezone(&Utc),
+                device_id: fields[1].clone(),
+                level_db: fields[2]
+                    .parse()
+                    .map_err(|error| format!("Ugyldigt lydniveau: {error}"))?,
+                weighting: if fields[3].is_empty() {
+                    None
+                } else {
+                    Some(fields[3].parse()?)
+                },
+                response: if fields[4].is_empty() {
+                    None
+                } else {
+                    Some(fields[4].parse()?)
+                },
+                raw: fields[5].clone(),
+            });
+        }
+    }
+    measurements.sort_by_key(|measurement| measurement.timestamp);
+    Ok(measurements)
+}
+
+fn summarize(session: &Session, measurements: &[Measurement]) -> SessionSummary {
+    let (minimum_db, maximum_db, average_db) = if measurements.is_empty() {
+        (None, None, None)
+    } else {
+        let minimum = measurements
+            .iter()
+            .map(|m| m.level_db)
+            .fold(f32::INFINITY, f32::min);
+        let maximum = measurements
+            .iter()
+            .map(|m| m.level_db)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let average =
+            measurements.iter().map(|m| m.level_db).sum::<f32>() / measurements.len() as f32;
+        (Some(minimum), Some(maximum), Some(average))
+    };
+    SessionSummary {
+        id: session.id.clone(),
+        title: session.title.clone(),
+        event_type: session.event_type.clone(),
+        event_date: session.event_date,
+        started: session.started,
+        ended: session.ended,
+        responsible_engineer_name: session.responsible_engineer_name.clone(),
+        device_count: session.devices.len(),
+        sample_count: measurements.len(),
+        minimum_db,
+        maximum_db,
+        average_db,
+    }
+}
+
+fn measurement_filename(device_id: &str) -> String {
+    let name: String = device_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("measurements-{}.csv", name.trim_matches('-'))
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
+}
+
+fn parse_csv_line(line: &str) -> Result<Vec<String>, String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                fields.push(std::mem::take(&mut field));
+            }
+            _ => field.push(character),
+        }
+    }
+    if quoted {
+        return Err("Uafsluttet citationstegn i målefilen.".to_owned());
+    }
+    fields.push(field);
+    Ok(fields)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use chrono::{Local, Utc};
+    use sound_monitor::measurement::{FrequencyWeighting, Measurement, TimeWeighting};
+
+    use super::{csv_field, parse_csv_line, AddMarkerRequest, SessionStore, StartSessionRequest};
+
+    #[test]
+    fn csv_round_trip_preserves_device_payload() {
+        let value = "N:51.2, display says \"hold\"";
+        let line = format!("a,b,c,d,e,{}", csv_field(value));
+        assert_eq!(parse_csv_line(&line).unwrap()[5], value);
+    }
+
+    #[test]
+    fn stores_and_loads_a_complete_session() {
+        let container = std::env::temp_dir().join(format!(
+            "sound-monitor-storage-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let root = container.join("Sessions");
+        let store = SessionStore::new(root.clone()).unwrap();
+        let session = store
+            .start(StartSessionRequest {
+                title: "Soundcheck".to_owned(),
+                event_type: "rehearsal".to_owned(),
+                event_date: Local::now().date_naive(),
+                responsible_engineer_name: Some("Ada".to_owned()),
+                devices: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            store.delete(&session.id).unwrap_err(),
+            "En aktiv session kan ikke slettes."
+        );
+        store
+            .record(&Measurement {
+                timestamp: Utc::now(),
+                device_id: "digital-sound-8922:test".to_owned(),
+                level_db: 71.4,
+                weighting: Some(FrequencyWeighting::C),
+                response: Some(TimeWeighting::Slow),
+                raw: "N:071.4,hold".to_owned(),
+            })
+            .unwrap();
+        let marker = store
+            .add_marker(AddMarkerRequest {
+                label: "Worship starts".to_owned(),
+                note: Some("Band enters".to_owned()),
+            })
+            .unwrap();
+        assert_eq!(marker.session_id, session.id);
+        store.stop().unwrap();
+
+        let summaries = store.list().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].sample_count, 1);
+        assert_eq!(summaries[0].average_db, Some(71.4));
+        let detail = store.load(&session.id).unwrap();
+        assert_eq!(
+            detail.session.responsible_engineer_name.as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(detail.measurements[0].raw, "N:071.4,hold");
+        assert_eq!(detail.session.markers[0].label, "Worship starts");
+        assert!(detail.session.ended.is_some());
+
+        let exported = store.export(&session.id).unwrap();
+        let export_directory = std::path::Path::new(&exported.directory);
+        assert!(export_directory.join("session.json").is_file());
+        assert!(export_directory.join("measurements.csv").is_file());
+        assert!(export_directory.join("markers.csv").is_file());
+
+        store.delete(&session.id).unwrap();
+        assert!(store.list().unwrap().is_empty());
+
+        fs::remove_dir_all(container).unwrap();
+    }
+}
