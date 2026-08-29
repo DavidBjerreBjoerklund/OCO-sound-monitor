@@ -124,7 +124,7 @@ fn build_session_suggestion(now: DateTime<FixedOffset>) -> SessionSuggestion {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(DeviceManager::default())
         .setup(|app| {
             let root = app
@@ -149,8 +149,25 @@ pub fn run() {
             export_session,
             delete_session
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Sound Monitor");
+        .build(tauri::generate_context!())
+        .expect("error while building Sound Monitor");
+
+    app.run(|app_handle, event| {
+        let should_finalize = matches!(event, tauri::RunEvent::ExitRequested { .. })
+            || matches!(
+                event,
+                tauri::RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::CloseRequested { .. },
+                    ..
+                }
+            );
+        if should_finalize {
+            let store = app_handle.state::<SessionStore>();
+            if let Err(error) = store.finish_active_on_shutdown() {
+                eprintln!("Could not finalize the active session during shutdown: {error}");
+            }
+        }
+    });
 }
 
 #[cfg(test)]

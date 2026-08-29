@@ -28,6 +28,7 @@ pub struct SessionSummary {
     pub event_date: NaiveDate,
     pub started: DateTime<FixedOffset>,
     pub ended: Option<DateTime<FixedOffset>>,
+    pub interrupted: bool,
     pub responsible_engineer_name: Option<String>,
     pub device_count: usize,
     pub sample_count: usize,
@@ -73,6 +74,7 @@ impl SessionStore {
     pub fn new(root: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&root)
             .map_err(|error| format!("Kunne ikke oprette sessionsmappe: {error}"))?;
+        recover_interrupted_sessions(&root)?;
         Ok(Self {
             root,
             active: Arc::new(Mutex::new(None)),
@@ -110,6 +112,7 @@ impl SessionStore {
             event_date: request.event_date,
             started,
             ended: None,
+            interrupted: false,
             responsible_engineer_id: None,
             responsible_engineer_name: request
                 .responsible_engineer_name
@@ -129,21 +132,37 @@ impl SessionStore {
     }
 
     pub fn stop(&self) -> Result<Session, String> {
+        self.finish_active(Local::now().fixed_offset(), false)?
+            .ok_or_else(|| "Der er ingen aktiv session.".to_owned())
+    }
+
+    pub fn finish_active_on_shutdown(&self) -> Result<Option<Session>, String> {
+        self.finish_active(Local::now().fixed_offset(), false)
+    }
+
+    fn finish_active(
+        &self,
+        ended: DateTime<FixedOffset>,
+        interrupted: bool,
+    ) -> Result<Option<Session>, String> {
         let mut guard = self
             .active
             .lock()
             .map_err(|_| "Sessionslageret er låst.".to_owned())?;
-        let Some(mut active) = guard.take() else {
-            return Err("Der er ingen aktiv session.".to_owned());
+        let Some(active) = guard.as_mut() else {
+            return Ok(None);
         };
         for writer in active.writers.values_mut() {
             writer
                 .flush()
                 .map_err(|error| format!("Kunne ikke afslutte målefilen: {error}"))?;
         }
-        active.session.ended = Some(Local::now().fixed_offset());
+        active.session.ended = Some(ended);
+        active.session.interrupted = interrupted;
         write_session_metadata(&active.directory, &active.session)?;
-        Ok(active.session)
+        let session = active.session.clone();
+        *guard = None;
+        Ok(Some(session))
     }
 
     pub fn record(&self, measurement: &Measurement) -> Result<(), String> {
@@ -378,6 +397,36 @@ fn write_session_metadata(directory: &Path, session: &Session) -> Result<(), Str
         .map_err(|error| format!("Kunne ikke færdiggøre sessionen: {error}"))
 }
 
+fn recover_interrupted_sessions(root: &Path) -> Result<usize, String> {
+    let mut recovered = 0;
+    for directory in session_directories(root)? {
+        let mut session = read_session_metadata(&directory)?;
+        if session.ended.is_some() {
+            continue;
+        }
+
+        let mut ended = session.started;
+        for measurement in read_measurements(&directory)? {
+            let timestamp = measurement
+                .timestamp
+                .with_timezone(session.started.offset());
+            if timestamp > ended {
+                ended = timestamp;
+            }
+        }
+        for marker in &session.markers {
+            if marker.timestamp > ended {
+                ended = marker.timestamp;
+            }
+        }
+        session.ended = Some(ended);
+        session.interrupted = true;
+        write_session_metadata(&directory, &session)?;
+        recovered += 1;
+    }
+    Ok(recovered)
+}
+
 fn read_session_metadata(directory: &Path) -> Result<Session, String> {
     let payload = fs::read(directory.join("session.json"))
         .map_err(|error| format!("Kunne ikke læse sessionen: {error}"))?;
@@ -467,6 +516,7 @@ fn summarize(session: &Session, measurements: &[Measurement]) -> SessionSummary 
         event_date: session.event_date,
         started: session.started,
         ended: session.ended,
+        interrupted: session.interrupted,
         responsible_engineer_name: session.responsible_engineer_name.clone(),
         device_count: session.devices.len(),
         sample_count: measurements.len(),
@@ -591,6 +641,7 @@ mod tests {
         assert_eq!(detail.measurements[0].raw, "N:071.4,hold");
         assert_eq!(detail.session.markers[0].label, "Worship starts");
         assert!(detail.session.ended.is_some());
+        assert!(!detail.session.interrupted);
 
         let exported = store.export(&session.id).unwrap();
         let export_directory = std::path::Path::new(&exported.directory);
@@ -600,6 +651,86 @@ mod tests {
 
         store.delete(&session.id).unwrap();
         assert!(store.list().unwrap().is_empty());
+
+        fs::remove_dir_all(container).unwrap();
+    }
+
+    #[test]
+    fn recovers_an_interrupted_session_at_its_last_measurement() {
+        let container = std::env::temp_dir().join(format!(
+            "sound-monitor-recovery-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let root = container.join("Sessions");
+        let (session_id, measurement_time) = {
+            let store = SessionStore::new(root.clone()).unwrap();
+            let session = store
+                .start(StartSessionRequest {
+                    title: "Interrupted recording".to_owned(),
+                    event_type: "service".to_owned(),
+                    event_date: Local::now().date_naive(),
+                    responsible_engineer_name: None,
+                    devices: Vec::new(),
+                })
+                .unwrap();
+            let measurement_time = Utc::now();
+            store
+                .record(&Measurement {
+                    timestamp: measurement_time,
+                    device_id: "digital-sound-8922:test".to_owned(),
+                    level_db: 72.3,
+                    weighting: Some(FrequencyWeighting::A),
+                    response: Some(TimeWeighting::Fast),
+                    raw: "N:072.3".to_owned(),
+                })
+                .unwrap();
+            (session.id, measurement_time)
+        };
+
+        let recovered_store = SessionStore::new(root).unwrap();
+        let recovered = recovered_store.load(&session_id).unwrap().session;
+        assert!(recovered.interrupted);
+        assert_eq!(
+            recovered.ended.unwrap().with_timezone(&Utc),
+            measurement_time
+        );
+        assert!(recovered_store
+            .finish_active_on_shutdown()
+            .unwrap()
+            .is_none());
+
+        fs::remove_dir_all(container).unwrap();
+    }
+
+    #[test]
+    fn clean_shutdown_finalizes_an_active_session_once() {
+        let container = std::env::temp_dir().join(format!(
+            "sound-monitor-shutdown-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let root = container.join("Sessions");
+        let store = SessionStore::new(root).unwrap();
+        let session = store
+            .start(StartSessionRequest {
+                title: "Closing app".to_owned(),
+                event_type: "service".to_owned(),
+                event_date: Local::now().date_naive(),
+                responsible_engineer_name: None,
+                devices: Vec::new(),
+            })
+            .unwrap();
+
+        let finalized = store.finish_active_on_shutdown().unwrap().unwrap();
+        assert_eq!(finalized.id, session.id);
+        assert!(finalized.ended.is_some());
+        assert!(!finalized.interrupted);
+        assert!(store.finish_active_on_shutdown().unwrap().is_none());
+
+        let mut legacy_json = serde_json::to_value(finalized).unwrap();
+        legacy_json.as_object_mut().unwrap().remove("interrupted");
+        let legacy_session: sound_monitor::session::Session =
+            serde_json::from_value(legacy_json).unwrap();
+        assert!(!legacy_session.interrupted);
 
         fs::remove_dir_all(container).unwrap();
     }

@@ -19,6 +19,7 @@ import type {
 } from "./types";
 
 const MAX_CHART_POINTS = 540;
+const RED_ZONE_DB = 90;
 const eventLabels: Record<string, string> = {
   service: "Gudstjeneste", "worship-night": "Lovsangsaften", concert: "Koncert",
   conference: "Konference", rehearsal: "Prøve", special: "Særligt event",
@@ -48,6 +49,48 @@ function calculateStats(measurements: Measurement[]) {
   if (!measurements.length) return null;
   const levels = measurements.map((measurement) => measurement.levelDb);
   return { min: Math.min(...levels), max: Math.max(...levels), average: levels.reduce((sum, value) => sum + value, 0) / levels.length };
+}
+
+function calculateRedZoneSeconds(measurements: Measurement[]): number {
+  if (measurements.length < 2) return 0;
+  const points = measurements
+    .map((measurement) => ({ timestamp: new Date(measurement.timestamp).getTime(), level: measurement.levelDb }))
+    .filter((point) => Number.isFinite(point.timestamp) && Number.isFinite(point.level))
+    .sort((left, right) => left.timestamp - right.timestamp);
+  const deltas = points.slice(1)
+    .map((point, index) => point.timestamp - points[index].timestamp)
+    .filter((delta) => delta > 0)
+    .sort((left, right) => left - right);
+  if (!deltas.length) return 0;
+  const medianDelta = deltas[Math.floor(deltas.length / 2)];
+  const maximumContinuousGap = Math.min(10_000, Math.max(2_000, medianDelta * 5));
+  let redMilliseconds = 0;
+
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const current = points[index];
+    const interval = current.timestamp - previous.timestamp;
+    if (interval <= 0 || interval > maximumContinuousGap) continue;
+    if (previous.level >= RED_ZONE_DB && current.level >= RED_ZONE_DB) {
+      redMilliseconds += interval;
+    } else if (previous.level < RED_ZONE_DB && current.level >= RED_ZONE_DB) {
+      const crossing = (RED_ZONE_DB - previous.level) / (current.level - previous.level);
+      redMilliseconds += interval * (1 - crossing);
+    } else if (previous.level >= RED_ZONE_DB && current.level < RED_ZONE_DB) {
+      const crossing = (previous.level - RED_ZONE_DB) / (previous.level - current.level);
+      redMilliseconds += interval * crossing;
+    }
+  }
+  return redMilliseconds / 1_000;
+}
+
+function formatElapsed(seconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+  const short = `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
+  return hours ? `${hours}:${short}` : short;
 }
 
 function levelStatus(level: number | undefined) {
@@ -91,11 +134,13 @@ function Chart({ measurements, markers = [], emptyText }: { measurements: Measur
 
 function Stats({ measurements }: { measurements: Measurement[] }) {
   const stats = calculateStats(measurements);
+  const redZone = formatElapsed(calculateRedZoneSeconds(measurements));
   return <div className="stats-strip">
     <div><span>Minimum</span><strong>{stats ? stats.min.toFixed(1) : "--.-"}</strong><small>dB</small></div>
     <div><span>Gennemsnit</span><strong>{stats ? stats.average.toFixed(1) : "--.-"}</strong><small>dB</small></div>
     <div><span>Maksimum</span><strong>{stats ? stats.max.toFixed(1) : "--.-"}</strong><small>dB</small></div>
     <div><span>Samples</span><strong>{measurements.length}</strong><small>stk.</small></div>
+    <div className="red-zone-stat"><span>Tid i rød zone</span><strong>{redZone}</strong><small>≥ {RED_ZONE_DB} dB</small></div>
   </div>;
 }
 
@@ -159,7 +204,12 @@ function App() {
       setError(event.data.message);
     } else {
       setConnectionStatus(event.data.status);
-      if (event.data.status === "error") setError(event.data.message ?? "Forbindelsen til måleren blev afbrudt.");
+      if (event.data.status === "connected") {
+        setError(null);
+        if (event.data.message) setNotice(event.data.message);
+      } else if (event.data.status === "error") {
+        setError(event.data.message ?? "Forbindelsen til måleren blev afbrudt.");
+      }
     }
   }, []);
 
@@ -250,7 +300,9 @@ function App() {
   const latest = measurements.at(-1);
   const currentLevelStatus = levelStatus(latest?.levelDb);
   const connected = connectionStatus === "connected";
-  const statusLabel = connectionStatus === "connecting" ? "Forbinder" : connected ? "Forbundet" : connectionStatus === "error" ? "Fejl" : "Ikke forbundet";
+  const reconnecting = connectionStatus === "reconnecting";
+  const connectionActive = connected || reconnecting;
+  const statusLabel = connectionStatus === "connecting" ? "Forbinder" : reconnecting ? "Genforbinder" : connected ? "Forbundet" : connectionStatus === "error" ? "Fejl" : "Ikke forbundet";
 
   return <div className="app-shell">
     <header className="topbar">
@@ -278,23 +330,23 @@ function App() {
 
       <section className="live-panel">
         <div className="live-header"><div><span className="eyebrow">Main room</span><h1>Live niveau</h1></div><div className={`live-reading ${latest ? currentLevelStatus.tone : "idle"}`}><div className="reading-value"><strong>{latest ? latest.levelDb.toFixed(1) : "--.-"}</strong><span>dB{latest?.weighting ?? weighting}</span></div><div className="level-indicator"><i aria-hidden="true" /><span>{currentLevelStatus.label}</span></div></div></div>
-        <Chart measurements={measurements} markers={activeSession?.markers} emptyText={connected ? "Venter på målinger" : "Forbind en måler"} />
+        <Chart measurements={measurements} markers={activeSession?.markers} emptyText={reconnecting ? "Venter på genforbindelse" : connected ? "Venter på målinger" : "Forbind en måler"} />
         <Stats measurements={measurements} />
       </section>
 
       <aside className="device-panel">
         <div className="panel-heading compact"><Cable size={17} /><div><span className="eyebrow">Input</span><h2>Enhed</h2></div></div>
-        <div className="port-control"><label className="field grow"><span>Seriel port</span><select value={selectedPort} onChange={(event) => setSelectedPort(event.target.value)} disabled={connected}>{devices.length === 0 && <option value="">Ingen porte fundet</option>}{devices.map((device) => <option key={device.id} value={device.serialPort}>{device.serialPort}</option>)}</select></label><button className="icon-button" type="button" onClick={() => void refreshDevices()} aria-label="Genindlæs porte" title="Genindlæs porte" disabled={connected}><RefreshCw size={16} /></button></div>
-        <fieldset className="control-group" disabled={connected}><legend>Frekvensvægtning</legend><div className="segmented four">{(["A", "C", "D", "Z"] as FrequencyWeighting[]).map((value) => <button className={weighting === value ? "active" : ""} type="button" key={value} onClick={() => setWeighting(value)}>{value}</button>)}</div></fieldset>
-        <fieldset className="control-group" disabled={connected}><legend>Respons</legend><div className="segmented">{(["Fast", "Slow"] as TimeWeighting[]).map((value) => <button className={response === value ? "active" : ""} type="button" key={value} onClick={() => setResponse(value)}>{value}</button>)}</div></fieldset>
-        <div className="connection-state">{connected ? <Wifi size={17} /> : <WifiOff size={17} />}<div><span>Status</span><strong>{statusLabel}</strong></div></div>
-        <button className={`connect-button ${connected ? "disconnect" : ""}`} type="button" onClick={() => void (connected ? handleDisconnect() : handleConnect())} disabled={!selectedPort || connectionStatus === "connecting"}>{connected ? <WifiOff size={16} /> : <Plug size={16} />}{connected ? "Afbryd" : connectionStatus === "connecting" ? "Forbinder" : "Forbind"}</button>
+        <div className="port-control"><label className="field grow"><span>Seriel port</span><select value={selectedPort} onChange={(event) => setSelectedPort(event.target.value)} disabled={connectionActive}>{devices.length === 0 && <option value="">Ingen porte fundet</option>}{devices.map((device) => <option key={device.id} value={device.serialPort}>{device.serialPort}</option>)}</select></label><button className="icon-button" type="button" onClick={() => void refreshDevices()} aria-label="Genindlæs porte" title="Genindlæs porte" disabled={connectionActive}><RefreshCw size={16} /></button></div>
+        <fieldset className="control-group" disabled={connectionActive}><legend>Frekvensvægtning</legend><div className="segmented four">{(["A", "C", "D", "Z"] as FrequencyWeighting[]).map((value) => <button className={weighting === value ? "active" : ""} type="button" key={value} onClick={() => setWeighting(value)}>{value}</button>)}</div></fieldset>
+        <fieldset className="control-group" disabled={connectionActive}><legend>Respons</legend><div className="segmented">{(["Fast", "Slow"] as TimeWeighting[]).map((value) => <button className={response === value ? "active" : ""} type="button" key={value} onClick={() => setResponse(value)}>{value}</button>)}</div></fieldset>
+        <div className={`connection-state ${reconnecting ? "reconnecting" : ""}`}>{reconnecting ? <RefreshCw className="spin" size={17} /> : connected ? <Wifi size={17} /> : <WifiOff size={17} />}<div><span>Status</span><strong>{statusLabel}</strong></div></div>
+        <button className={`connect-button ${connectionActive ? "disconnect" : ""}`} type="button" onClick={() => void (connectionActive ? handleDisconnect() : handleConnect())} disabled={!selectedPort || connectionStatus === "connecting"}>{connectionActive ? <WifiOff size={16} /> : <Plug size={16} />}{connectionActive ? "Afbryd" : connectionStatus === "connecting" ? "Forbinder" : "Forbind"}</button>
       </aside>
     </main> : <main className="archive-workspace">
       <aside className="archive-list-panel">
         <div className="archive-list-heading"><div><span className="eyebrow">Bibliotek</span><h2>Sessioner</h2></div><button className="icon-button" type="button" onClick={() => void refreshArchive()} aria-label="Genindlæs arkiv" title="Genindlæs arkiv"><RefreshCw size={16} /></button></div>
         <label className="search-field"><Search size={15} /><input value={archiveSearch} onChange={(event) => setArchiveSearch(event.target.value)} placeholder="Søg i arkivet" aria-label="Søg i arkivet" /></label>
-        <div className="archive-list">{filteredArchive.map((session) => <button type="button" className={`archive-row ${selectedSession?.session.id === session.id ? "active" : ""}`} key={session.id} onClick={() => void selectArchiveSession(session.id)}><span className="archive-row-date">{formatDate(session.eventDate)}</span><strong>{session.title}</strong><span>{eventLabels[session.eventType] ?? session.eventType} · {session.sampleCount.toLocaleString("da-DK")} samples</span></button>)}{!filteredArchive.length && <div className="archive-empty"><Archive size={24} /><span>Ingen gemte sessioner</span></div>}</div>
+        <div className="archive-list">{filteredArchive.map((session) => <button type="button" className={`archive-row ${selectedSession?.session.id === session.id ? "active" : ""}`} key={session.id} onClick={() => void selectArchiveSession(session.id)}><span className="archive-row-date">{formatDate(session.eventDate)}</span><strong>{session.title}</strong><span>{eventLabels[session.eventType] ?? session.eventType} · {session.sampleCount.toLocaleString("da-DK")} samples{session.interrupted ? " · Gendannet" : ""}</span></button>)}{!filteredArchive.length && <div className="archive-empty"><Archive size={24} /><span>Ingen gemte sessioner</span></div>}</div>
       </aside>
       <section className="archive-detail">{selectedSession ? <>
         <div className="archive-detail-header"><div><span className="eyebrow">{eventLabels[selectedSession.session.eventType] ?? selectedSession.session.eventType}</span><h1>{selectedSession.session.title}</h1></div><div className="archive-header-actions"><div className="archive-date"><CalendarDays size={15} />{formatDate(selectedSession.session.eventDate)}</div><button className="export-button" type="button" onClick={() => void handleExport()}><Download size={15} /> Eksportér</button></div></div>
@@ -303,7 +355,7 @@ function App() {
       </> : <div className="detail-empty"><FolderOpen size={32} /><h2>Vælg en session</h2><span>Målinger og metadata vises her</span></div>}</section>
       <aside className="archive-meta-panel">
         <div className="panel-heading compact"><HardDrive size={17} /><div><span className="eyebrow">Detaljer</span><h2>Session</h2></div></div>
-        {selectedSession ? <><div className="metadata-list"><div><span><Clock3 size={13} /> Varighed</span><strong>{duration(selectedSession.session.started, selectedSession.session.ended)}</strong></div><div><span><Users size={13} /> Lydansvarlig</span><strong>{selectedSession.session.responsibleEngineerName || "Ikke angivet"}</strong></div><div><span><Cable size={13} /> Enheder</span><strong>{selectedSession.session.devices.length}</strong></div>{selectedSession.session.devices.map((device) => <div className="device-record" key={device.id}><span>{device.name}</span><strong>dB{device.weighting ?? "?"} · {device.response ?? "Ukendt"}</strong></div>)}</div><div className="marker-list"><div className="marker-list-heading"><Flag size={13} /><span>Markører</span><strong>{selectedSession.session.markers.length}</strong></div>{selectedSession.session.markers.map((marker) => <div className="marker-row" key={marker.id}><time>{formatChartTime(marker.timestamp)}</time><strong>{marker.label}</strong>{marker.note && <span>{marker.note}</span>}</div>)}{!selectedSession.session.markers.length && <span className="no-markers">Ingen markører</span>}</div><button className="delete-session-button" type="button" onClick={() => setDeleteCandidate(selectedSession.session)}><Trash2 size={15} /> Slet session</button></> : null}
+        {selectedSession ? <><div className="metadata-list"><div><span><Clock3 size={13} /> Varighed</span><strong>{duration(selectedSession.session.started, selectedSession.session.ended)}</strong></div>{selectedSession.session.interrupted && <div className="recovered-session"><span><RefreshCw size={13} /> Status</span><strong>Gendannet efter afbrydelse</strong></div>}<div><span><Users size={13} /> Lydansvarlig</span><strong>{selectedSession.session.responsibleEngineerName || "Ikke angivet"}</strong></div><div><span><Cable size={13} /> Enheder</span><strong>{selectedSession.session.devices.length}</strong></div>{selectedSession.session.devices.map((device) => <div className="device-record" key={device.id}><span>{device.name}</span><strong>dB{device.weighting ?? "?"} · {device.response ?? "Ukendt"}</strong></div>)}</div><div className="marker-list"><div className="marker-list-heading"><Flag size={13} /><span>Markører</span><strong>{selectedSession.session.markers.length}</strong></div>{selectedSession.session.markers.map((marker) => <div className="marker-row" key={marker.id}><time>{formatChartTime(marker.timestamp)}</time><strong>{marker.label}</strong>{marker.note && <span>{marker.note}</span>}</div>)}{!selectedSession.session.markers.length && <span className="no-markers">Ingen markører</span>}</div><button className="delete-session-button" type="button" onClick={() => setDeleteCandidate(selectedSession.session)}><Trash2 size={15} /> Slet session</button></> : null}
         <div className="library-path"><span>Lagerplacering</span><code title={archivePath}>{archivePath || "Indlæser..."}</code></div>
       </aside>
     </main>}

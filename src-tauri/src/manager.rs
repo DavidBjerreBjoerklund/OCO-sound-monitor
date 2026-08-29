@@ -12,6 +12,9 @@ use tauri::ipc::Channel;
 
 use crate::storage::SessionStore;
 
+const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(300);
+const MAX_RECONNECT_DELAY_SECONDS: u64 = 8;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectOptions {
@@ -24,8 +27,8 @@ pub struct ConnectOptions {
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionStatus {
     Connected,
+    Reconnecting,
     Disconnected,
-    Error,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,10 +69,12 @@ impl DeviceManager {
         on_event: Channel<DeviceEvent>,
         session_store: SessionStore,
     ) -> Result<String, String> {
-        let driver = DigitalSound8922Driver::new(DigitalSound8922Config {
+        let config = DigitalSound8922Config {
             weighting: options.weighting,
             response: options.response,
-        });
+        };
+        let driver = DigitalSound8922Driver::new(config);
+        let port = options.port.clone();
         let device_id = format!("{}:{}", driver.id(), options.port);
 
         let mut connections = self
@@ -81,7 +86,7 @@ impl DeviceManager {
         }
 
         let connection = driver
-            .connect(&options.port, Duration::from_millis(300))
+            .connect(&port, SERIAL_READ_TIMEOUT)
             .map_err(|error| format!("Could not connect to {}: {error}", options.port))?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
@@ -95,6 +100,8 @@ impl DeviceManager {
                     thread_stop,
                     on_event,
                     session_store,
+                    port,
+                    config,
                 )
             })
             .map_err(|error| format!("Could not start device reader: {error}"))?;
@@ -153,6 +160,8 @@ fn run_reader(
     stop: Arc<AtomicBool>,
     on_event: Channel<DeviceEvent>,
     session_store: SessionStore,
+    port: String,
+    config: DigitalSound8922Config,
 ) {
     if on_event
         .send(DeviceEvent::Status {
@@ -180,12 +189,47 @@ fn run_reader(
             }
             Ok(None) => {}
             Err(error) => {
-                let _ = on_event.send(DeviceEvent::Status {
-                    device_id: device_id.clone(),
-                    status: ConnectionStatus::Error,
-                    message: Some(error.to_string()),
-                });
-                return;
+                let mut last_error = error.to_string();
+                let mut attempt = 0;
+                loop {
+                    attempt += 1;
+                    let delay = reconnect_delay(attempt);
+                    if on_event
+                        .send(DeviceEvent::Status {
+                            device_id: device_id.clone(),
+                            status: ConnectionStatus::Reconnecting,
+                            message: Some(format!(
+                                "Forbindelsen blev afbrudt ({last_error}). Nyt forsøg om {} sek.",
+                                delay.as_secs()
+                            )),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if wait_for_stop(&stop, delay) {
+                        break;
+                    }
+
+                    let driver = DigitalSound8922Driver::new(config);
+                    match driver.connect(&port, SERIAL_READ_TIMEOUT) {
+                        Ok(reconnected) => {
+                            connection = reconnected;
+                            if on_event
+                                .send(DeviceEvent::Status {
+                                    device_id: device_id.clone(),
+                                    status: ConnectionStatus::Connected,
+                                    message: Some("Forbindelsen er genoprettet.".to_owned()),
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                            break;
+                        }
+                        Err(error) => last_error = error.to_string(),
+                    }
+                }
             }
         }
     }
@@ -195,4 +239,36 @@ fn run_reader(
         status: ConnectionStatus::Disconnected,
         message: None,
     });
+}
+
+fn reconnect_delay(attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(3);
+    Duration::from_secs((1_u64 << exponent).min(MAX_RECONNECT_DELAY_SECONDS))
+}
+
+fn wait_for_stop(stop: &AtomicBool, duration: Duration) -> bool {
+    let interval = Duration::from_millis(100);
+    let mut waited = Duration::ZERO;
+    while waited < duration {
+        if stop.load(Ordering::Acquire) {
+            return true;
+        }
+        let sleep_for = interval.min(duration - waited);
+        thread::sleep(sleep_for);
+        waited += sleep_for;
+    }
+    stop.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconnect_delay;
+
+    #[test]
+    fn reconnect_backoff_caps_at_eight_seconds() {
+        let delays: Vec<_> = (1..=6)
+            .map(|attempt| reconnect_delay(attempt).as_secs())
+            .collect();
+        assert_eq!(delays, [1, 2, 4, 8, 8, 8]);
+    }
 }

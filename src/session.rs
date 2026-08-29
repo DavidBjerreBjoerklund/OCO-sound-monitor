@@ -40,6 +40,8 @@ pub struct Session {
     pub event_date: NaiveDate,
     pub started: DateTime<FixedOffset>,
     pub ended: Option<DateTime<FixedOffset>>,
+    #[serde(default)]
+    pub interrupted: bool,
     pub responsible_engineer_id: Option<String>,
     #[serde(default)]
     pub responsible_engineer_name: Option<String>,

@@ -46,11 +46,15 @@ The LIVE workspace currently provides:
 - searchable archive with session graph, statistics, devices, and engineer.
 - timestamped live markers with optional notes, persisted immediately,
 - green/yellow/red level indication with thresholds at 82 dB and 90 dB,
+- accumulated time in the red zone with threshold-crossing interpolation,
 - marker lines and annotations on live and historical graphs,
 - portable exports containing `session.json`, `measurements.csv`, and
   `markers.csv`,
 - permanent deletion of erroneous recordings from Archive with explicit
-  confirmation.
+  confirmation,
+- Digital Sound 8922 startup-zero filtering before live display and storage,
+- interrupted-session recovery plus clean finalization when the app closes,
+- automatic serial reconnection with capped exponential backoff.
 
 Sessions are stored below the platform-specific application data directory in
 `Sound Monitor/Sessions/<year>/<session-id>/`. Each folder contains a
@@ -142,6 +146,16 @@ Known startup behavior:
 - the device may emit `N:00.0` during startup,
 - some startup lines may contain leading NUL bytes, for example `\0N:00.0`,
 - after startup the stream stabilizes to normal `N:<level>` lines.
+
+The parser still recognizes startup lines so captured streams remain
+verifiable. The device connection filters readings at or below `0.0 dB`
+before they reach the live UI, statistics, or session storage.
+
+If an established serial connection drops, the desktop manager retries after
+1, 2, 4, and then at most 8 seconds until the device returns or the user
+disconnects. Sessions left without an end timestamp after a crash are closed
+at their last persisted measurement or marker and shown as recovered in the
+Archive.
 
 The driver reports serial disconnection errors to its caller. Reconnection and
 backoff belong to the application connection manager so the UI can show the

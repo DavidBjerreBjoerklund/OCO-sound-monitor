@@ -83,6 +83,9 @@ impl DeviceConnection for DigitalSound8922Connection {
                     self.config.weighting,
                     self.config.response,
                 ) {
+                    if is_startup_measurement(&measurement) {
+                        continue;
+                    }
                     return Ok(Some(measurement));
                 }
                 continue;
@@ -108,6 +111,10 @@ impl DeviceConnection for DigitalSound8922Connection {
     }
 }
 
+fn is_startup_measurement(measurement: &Measurement) -> bool {
+    measurement.level_db <= 0.0
+}
+
 fn take_line(buffer: &mut String) -> Option<String> {
     let index = buffer.find(|ch| ch == '\r' || ch == '\n')?;
     let line = buffer[..index].to_owned();
@@ -125,7 +132,10 @@ fn take_line(buffer: &mut String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::take_line;
+    use chrono::Utc;
+
+    use super::{is_startup_measurement, take_line};
+    use crate::measurement::Measurement;
 
     #[test]
     fn takes_crlf_lines_and_keeps_partial_tail() {
@@ -147,5 +157,25 @@ mod tests {
         let mut buffer = "\r\nN:051.5\r\n".to_owned();
         assert_eq!(take_line(&mut buffer), Some(String::new()));
         assert_eq!(take_line(&mut buffer), Some("N:051.5".to_owned()));
+    }
+
+    #[test]
+    fn filters_zero_level_startup_readings_before_they_reach_callers() {
+        let startup = Measurement {
+            timestamp: Utc::now(),
+            device_id: "meter-1".to_owned(),
+            level_db: 0.0,
+            weighting: None,
+            response: None,
+            raw: "N:00.0".to_owned(),
+        };
+        let live = Measurement {
+            level_db: 51.6,
+            raw: "N:051.6".to_owned(),
+            ..startup.clone()
+        };
+
+        assert!(is_startup_measurement(&startup));
+        assert!(!is_startup_measurement(&live));
     }
 }

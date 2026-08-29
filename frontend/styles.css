@@ -581,8 +581,20 @@ button {
   background: #e6b84b;
 }
 
+.status-dot.reconnecting {
+  background: #e6b84b;
+  box-shadow: 0 0 0 3px rgb(230 184 75 / 13%);
+  animation: status-pulse 1.2s ease-in-out infinite;
+}
+
 .status-dot.error {
   background: #ff6b55;
+}
+
+@keyframes status-pulse {
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .error-banner {
@@ -964,7 +976,7 @@ h2 {
 
 .stats-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(96px, 1.25fr);
   min-height: 104px;
 }
 
@@ -1004,6 +1016,26 @@ h2 {
   padding: 0 0 4px 5px;
   color: #7f8982;
   font-size: 10px;
+}
+
+.stats-strip .red-zone-stat strong,
+.stats-strip .red-zone-stat small {
+  color: #ef8b7e;
+}
+
+.stats-strip .red-zone-stat {
+  grid-template-columns: 1fr;
+}
+
+.stats-strip .red-zone-stat strong,
+.stats-strip .red-zone-stat small {
+  grid-column: 1;
+}
+
+.stats-strip .red-zone-stat small {
+  align-self: start;
+  padding: 1px 0 0;
+  white-space: nowrap;
 }
 
 .port-control {
@@ -1110,6 +1142,24 @@ h2 {
 .connection-state strong {
   color: #dce0db;
   font-size: 12px;
+}
+
+.connection-state.reconnecting {
+  color: #e6b84b;
+}
+
+.spin {
+  animation: reconnect-spin 1.2s linear infinite;
+}
+
+@keyframes reconnect-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.metadata-list .recovered-session strong {
+  color: #e6b84b;
 }
 
 .connect-button {

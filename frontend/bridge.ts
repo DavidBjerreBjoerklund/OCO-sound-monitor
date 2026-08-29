@@ -120,6 +120,7 @@ export async function startSession(request: StartSessionRequest): Promise<Sessio
   const session: Session = {
     formatVersion: 1, id: `preview-${Date.now()}`, title: request.title,
     eventType: request.eventType, eventDate: request.eventDate, started, ended: null,
+    interrupted: false,
     responsibleEngineerId: null, responsibleEngineerName: request.responsibleEngineerName,
     audioCrew: [], devices: request.devices, markers: [], notes: null,
   };
@@ -144,6 +145,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
     return {
       id: session.id, title: session.title, eventType: session.eventType,
       eventDate: session.eventDate, started: session.started, ended: session.ended,
+      interrupted: session.interrupted,
       responsibleEngineerName: session.responsibleEngineerName,
       deviceCount: session.devices.length, sampleCount: measurements.length,
       minimumDb: levels.length ? Math.min(...levels) : null,

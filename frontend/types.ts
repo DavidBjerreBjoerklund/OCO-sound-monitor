@@ -4,6 +4,7 @@ export type ConnectionStatus =
   | "idle"
   | "connecting"
   | "connected"
+  | "reconnecting"
   | "disconnected"
   | "error";
 
@@ -29,7 +30,7 @@ export type DeviceEvent =
       event: "status";
       data: {
         deviceId: string;
-        status: "connected" | "disconnected" | "error";
+        status: "connected" | "reconnecting" | "disconnected" | "error";
         message: string | null;
       };
     }
@@ -73,6 +74,7 @@ export interface Session {
   eventDate: string;
   started: string;
   ended: string | null;
+  interrupted: boolean;
   responsibleEngineerId: string | null;
   responsibleEngineerName: string | null;
   audioCrew: Array<{ personId: string; role: string }>;
@@ -104,6 +106,7 @@ export interface SessionSummary {
   eventDate: string;
   started: string;
   ended: string | null;
+  interrupted: boolean;
   responsibleEngineerName: string | null;
   deviceCount: number;
   sampleCount: number;
