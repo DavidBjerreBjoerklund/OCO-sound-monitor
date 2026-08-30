@@ -37,7 +37,9 @@ The LIVE workspace currently provides:
 - Digital Sound 8922 connect/disconnect through the Rust backend,
 - ordered live measurements over a Tauri IPC channel,
 - software-selected frequency and time weighting metadata,
-- realtime graph and min/Leq/max/sample statistics,
+- realtime graph with an intuitive current status, a rolling one-minute Leq,
+  five-second recent-peak guide, and min/Leq/max/sample statistics,
+- energy-based rolling 10-second Leq used internally to keep warnings stable,
 - editable session title, event type, date, and responsible engineer,
 - template-based session suggestions implemented outside the UI.
 - crash-resistant, file-based session storage managed by Rust,

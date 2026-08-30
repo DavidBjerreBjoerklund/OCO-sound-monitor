@@ -18,6 +18,7 @@ import type {
   Marker, Measurement, Session, SessionDetail, SessionSummary, TimeWeighting,
 } from "./types";
 import StatisticsView from "./StatisticsView";
+import { recentMaximum, rollingLeq } from "./liveMetrics";
 
 const MAX_CHART_POINTS = 540;
 const RED_ZONE_DB = 90;
@@ -97,12 +98,12 @@ function formatElapsed(seconds: number): string {
 
 function levelStatus(level: number | undefined) {
   if (level === undefined) return { tone: "idle", label: "Ingen måling" };
-  if (level >= 90) return { tone: "danger", label: "For højt" };
-  if (level >= 82) return { tone: "warning", label: "Højt" };
-  return { tone: "safe", label: "Normalt" };
+  if (level >= 90) return { tone: "danger", label: "Skru lidt ned" };
+  if (level >= 82) return { tone: "warning", label: "Pas på niveauet" };
+  return { tone: "safe", label: "Godt" };
 }
 
-function Chart({ measurements, markers = [], emptyText }: { measurements: Measurement[]; markers?: Marker[]; emptyText: string }) {
+function Chart({ measurements, markers = [], emptyText, recentPeak }: { measurements: Measurement[]; markers?: Marker[]; emptyText: string; recentPeak?: number | null }) {
   const levelGradientId = `level-gradient-${useId().replaceAll(":", "")}`;
   const data = measurements.map((measurement) => ({ at: new Date(measurement.timestamp).getTime(), level: measurement.levelDb }));
   return <div className="chart-wrap" aria-label="Lydniveaugraf">
@@ -127,6 +128,7 @@ function Chart({ measurements, markers = [], emptyText }: { measurements: Measur
         <Tooltip contentStyle={{ background: "#202421", border: "1px solid #3b423d", borderRadius: 4, color: "#f0f2ee" }} formatter={(value) => [`${Number(value).toFixed(1)} dB`, "Niveau"]} labelFormatter={(value) => formatChartTime(new Date(Number(value)).toISOString())} labelStyle={{ color: "#9aa39d" }} />
         <ReferenceLine y={82} stroke="#caa23f" strokeDasharray="4 4" label={{ value: "82", position: "insideRight", fill: "#d9b64f", fontSize: 10 }} />
         <ReferenceLine y={90} stroke="#df6657" strokeDasharray="4 4" label={{ value: "90", position: "insideRight", fill: "#f07a6b", fontSize: 10 }} />
+        {recentPeak !== null && recentPeak !== undefined && <ReferenceLine y={recentPeak} stroke="#a9b2ac" strokeDasharray="2 5" strokeOpacity={0.75} label={{ value: "Seneste top", position: "insideTopLeft", fill: "#a9b2ac", fontSize: 10 }} />}
         {markers.map((marker) => <ReferenceLine key={marker.id} x={new Date(marker.timestamp).getTime()} stroke="#48c9b0" strokeDasharray="3 3" label={{ value: marker.label, position: "insideTopRight", fill: "#8de0cf", fontSize: 10 }} />)}
         <Line type="monotone" dataKey="level" stroke={`url(#${levelGradientId})`} strokeWidth={2} dot={false} isAnimationActive={false} />
       </LineChart>
@@ -309,7 +311,11 @@ function App() {
 
   const filteredArchive = archive.filter((session) => `${session.title} ${eventLabels[session.eventType] ?? session.eventType} ${session.responsibleEngineerName ?? ""}`.toLocaleLowerCase("da").includes(archiveSearch.toLocaleLowerCase("da")));
   const latest = measurements.at(-1);
-  const currentLevelStatus = levelStatus(latest?.levelDb);
+  const shortTermLevel = rollingLeq(measurements, 10);
+  const minuteLevel = rollingLeq(measurements, 60);
+  const recentPeak = recentMaximum(measurements, 5);
+  const guidanceStatus = levelStatus(shortTermLevel ?? latest?.levelDb);
+  const currentReadingStatus = levelStatus(latest?.levelDb);
   const connected = connectionStatus === "connected";
   const reconnecting = connectionStatus === "reconnecting";
   const connectionActive = connected || reconnecting;
@@ -341,8 +347,14 @@ function App() {
       </aside>
 
       <section className="live-panel">
-        <div className="live-header"><div><span className="eyebrow">Main room</span><h1>Live niveau</h1></div><div className={`live-reading ${latest ? currentLevelStatus.tone : "idle"}`}><div className="reading-value"><strong>{latest ? latest.levelDb.toFixed(1) : "--.-"}</strong><span>dB{latest?.weighting ?? weighting}</span></div><div className="level-indicator"><i aria-hidden="true" /><span>{currentLevelStatus.label}</span></div></div></div>
-        <Chart measurements={measurements} markers={activeSession?.markers} emptyText={reconnecting ? "Venter på genforbindelse" : connected ? "Venter på målinger" : "Forbind en måler"} />
+        <div className="live-header">
+          <div className="live-heading"><span className="eyebrow">Main room</span><h1>Lydniveau nu</h1><div className={`level-guidance ${latest ? guidanceStatus.tone : "idle"}`} role="status" aria-live="polite"><i aria-hidden="true" /><strong>{guidanceStatus.label}</strong></div></div>
+          <div className="live-summary">
+            <div className="minute-reading"><span>Seneste minut</span><div><strong>{minuteLevel !== null ? minuteLevel.toFixed(1) : "--.-"}</strong><small>dB{latest?.weighting ?? weighting}</small></div></div>
+            <div className={`live-reading ${latest ? currentReadingStatus.tone : "idle"}`}><span className="reading-label">Nu</span><div className="reading-value"><strong>{latest ? latest.levelDb.toFixed(1) : "--.-"}</strong><span>dB{latest?.weighting ?? weighting}</span></div></div>
+          </div>
+        </div>
+        <Chart measurements={measurements} markers={activeSession?.markers} recentPeak={recentPeak} emptyText={reconnecting ? "Venter på genforbindelse" : connected ? "Venter på målinger" : "Forbind en måler"} />
         <Stats measurements={measurements} />
       </section>
 
