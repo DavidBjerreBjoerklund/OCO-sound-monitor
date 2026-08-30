@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -13,6 +13,8 @@ use sound_monitor::session::{Marker, Session, SessionDevice, SESSION_FORMAT_VERS
 use crate::statistics::{aggregate_sessions, calculate_statistics, ComparisonSeries};
 
 const STORAGE_FLUSH_BUCKETS: usize = 5;
+const SUMMARY_CACHE_FILE: &str = "summary.json";
+const SUMMARY_CACHE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,7 +26,7 @@ pub struct StartSessionRequest {
     pub devices: Vec<SessionDevice>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
     pub id: String,
@@ -84,6 +86,21 @@ pub struct AddMarkerRequest {
 pub struct ExportResult {
     pub directory: String,
     pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvExportResult {
+    pub path: String,
+    pub session_count: usize,
+    pub row_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedSummary {
+    cache_version: u32,
+    summary: SessionSummary,
 }
 
 struct ActiveSession {
@@ -287,6 +304,7 @@ impl SessionStore {
         active.session.ended = Some(ended);
         active.session.interrupted = interrupted;
         write_session_metadata(&active.directory, &active.session)?;
+        let _ = refresh_summary_cache(&active.directory, &active.session);
         let session = active.session.clone();
         *guard = None;
         Ok(Some(session))
@@ -364,8 +382,7 @@ impl SessionStore {
             if session.hidden && !include_hidden {
                 continue;
             }
-            let measurements = read_measurements(&directory)?;
-            summaries.push(summarize(&session, &measurements));
+            summaries.push(summary_for_session(&directory, &session)?);
         }
         summaries.sort_by(|left, right| right.started.cmp(&left.started));
         Ok(summaries)
@@ -415,7 +432,169 @@ impl SessionStore {
         let mut session = read_session_metadata(&directory)?;
         session.hidden = hidden;
         write_session_metadata(&directory, &session)?;
+        let _ = refresh_summary_cache(&directory, &session);
         Ok(session)
+    }
+
+    pub fn export_measurements_csv(
+        &self,
+        ids: &[String],
+        path: &Path,
+    ) -> Result<CsvExportResult, String> {
+        let sessions = self.export_sessions(ids)?;
+        let mut writer = csv_writer(path)?;
+        writer
+            .write_all(b"sessionId,sessionTitle,eventDate,eventType,engineer,started,elapsedSeconds,timestamp,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,deviceId,raw\n")
+            .map_err(|error| format!("Kunne ikke skrive CSV-headeren: {error}"))?;
+        let mut row_count = 0;
+
+        for (directory, session) in &sessions {
+            for_each_measurement(directory, |measurement| {
+                let elapsed = measurement
+                    .timestamp
+                    .signed_duration_since(session.started.with_timezone(&Utc))
+                    .num_milliseconds()
+                    .max(0) as f64
+                    / 1_000.0;
+                writeln!(
+                    writer,
+                    "{},{},{},{},{},{},{:.3},{},{},{},{},{},{},{},{},{}",
+                    csv_field(&session.id),
+                    csv_field(&session.title),
+                    session.event_date,
+                    csv_field(&session.event_type),
+                    csv_field(
+                        session
+                            .responsible_engineer_name
+                            .as_deref()
+                            .unwrap_or_default()
+                    ),
+                    csv_field(&session.started.to_rfc3339()),
+                    elapsed,
+                    csv_field(&measurement.timestamp.to_rfc3339()),
+                    measurement.level_db,
+                    measurement.minimum_db,
+                    measurement.maximum_db,
+                    measurement.sample_count,
+                    csv_field(
+                        &measurement
+                            .weighting
+                            .map(|value| value.to_string())
+                            .unwrap_or_default()
+                    ),
+                    csv_field(
+                        &measurement
+                            .response
+                            .map(|value| value.to_string())
+                            .unwrap_or_default()
+                    ),
+                    csv_field(&measurement.device_id),
+                    csv_field(&measurement.raw),
+                )
+                .map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?;
+                row_count += 1;
+                Ok(())
+            })?;
+        }
+        writer
+            .flush()
+            .map_err(|error| format!("Kunne ikke afslutte måleeksporten: {error}"))?;
+        Ok(CsvExportResult {
+            path: path.display().to_string(),
+            session_count: sessions.len(),
+            row_count,
+        })
+    }
+
+    pub fn export_statistics_csv(
+        &self,
+        ids: &[String],
+        path: &Path,
+    ) -> Result<CsvExportResult, String> {
+        let sessions = self.export_sessions(ids)?;
+        let mut writer = csv_writer(path)?;
+        writer
+            .write_all(b"sessionId,sessionTitle,eventDate,eventType,engineer,started,ended,durationSeconds,observedSeconds,sampleCount,deviceCount,minimumDb,leqDb,typicalLowDb,typicalHighDb,maximumDb,redZoneSeconds,redZonePercent,weightings,responses\n")
+            .map_err(|error| format!("Kunne ikke skrive CSV-headeren: {error}"))?;
+
+        for (directory, session) in &sessions {
+            let summary = summary_for_session(directory, session)?;
+            let duration = session
+                .ended
+                .map(|ended| {
+                    ended
+                        .signed_duration_since(session.started)
+                        .num_milliseconds()
+                        .max(0) as f64
+                        / 1_000.0
+                })
+                .unwrap_or_default();
+            writeln!(
+                writer,
+                "{},{},{},{},{},{},{},{:.3},{:.3},{},{},{},{},{},{},{},{:.3},{:.3},{},{}",
+                csv_field(&summary.id),
+                csv_field(&summary.title),
+                summary.event_date,
+                csv_field(&summary.event_type),
+                csv_field(
+                    summary
+                        .responsible_engineer_name
+                        .as_deref()
+                        .unwrap_or_default()
+                ),
+                csv_field(&summary.started.to_rfc3339()),
+                csv_field(
+                    &summary
+                        .ended
+                        .map(|value| value.to_rfc3339())
+                        .unwrap_or_default()
+                ),
+                duration,
+                summary.observed_seconds,
+                summary.sample_count,
+                summary.device_count,
+                optional_number(summary.minimum_db),
+                optional_number(summary.leq_db),
+                optional_number(summary.typical_low_db),
+                optional_number(summary.typical_high_db),
+                optional_number(summary.maximum_db),
+                summary.red_zone_seconds,
+                summary.red_zone_percent,
+                csv_field(&summary.weightings.join("|")),
+                csv_field(&summary.responses.join("|")),
+            )
+            .map_err(|error| format!("Kunne ikke skrive statistikeksporten: {error}"))?;
+        }
+        writer
+            .flush()
+            .map_err(|error| format!("Kunne ikke afslutte statistikeksporten: {error}"))?;
+        Ok(CsvExportResult {
+            path: path.display().to_string(),
+            session_count: sessions.len(),
+            row_count: sessions.len(),
+        })
+    }
+
+    fn export_sessions(&self, ids: &[String]) -> Result<Vec<(PathBuf, Session)>, String> {
+        if ids.is_empty() {
+            return Err("Vælg mindst én session til eksport.".to_owned());
+        }
+        let directories = session_directories(&self.root)?;
+        let mut seen = HashSet::new();
+        let mut sessions = Vec::new();
+        for id in ids.iter().filter(|id| seen.insert((*id).clone())) {
+            let directory = directories
+                .iter()
+                .find(|directory| directory.file_name().and_then(|name| name.to_str()) == Some(id))
+                .cloned()
+                .ok_or_else(|| format!("Sessionen blev ikke fundet: {id}"))?;
+            let session = read_session_metadata(&directory)?;
+            if session.hidden {
+                return Err("Skjulte sessioner kan ikke eksporteres.".to_owned());
+            }
+            sessions.push((directory, session));
+        }
+        Ok(sessions)
     }
 
     pub fn export(&self, id: &str) -> Result<ExportResult, String> {
@@ -448,6 +627,20 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let payload = serde_json::to_vec_pretty(value)
         .map_err(|error| format!("Kunne ikke serialisere eksporten: {error}"))?;
     fs::write(path, payload).map_err(|error| format!("Kunne ikke skrive eksporten: {error}"))
+}
+
+fn csv_writer(path: &Path) -> Result<BufWriter<File>, String> {
+    let mut writer = BufWriter::new(
+        File::create(path).map_err(|error| format!("Kunne ikke oprette CSV-filen: {error}"))?,
+    );
+    writer
+        .write_all(b"\xEF\xBB\xBF")
+        .map_err(|error| format!("Kunne ikke starte CSV-filen: {error}"))?;
+    Ok(writer)
+}
+
+fn optional_number(value: Option<f32>) -> String {
+    value.map(|number| number.to_string()).unwrap_or_default()
 }
 
 fn write_measurement_export(path: &Path, measurements: &[StoredMeasurement]) -> Result<(), String> {
@@ -566,6 +759,7 @@ fn recover_interrupted_sessions(root: &Path) -> Result<usize, String> {
         session.ended = Some(ended);
         session.interrupted = true;
         write_session_metadata(&directory, &session)?;
+        let _ = refresh_summary_cache(&directory, &session);
         recovered += 1;
     }
     Ok(recovered)
@@ -596,60 +790,143 @@ fn session_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
 
 fn read_measurements(directory: &Path) -> Result<Vec<StoredMeasurement>, String> {
     let mut measurements = Vec::new();
+    for_each_measurement(directory, |measurement| {
+        measurements.push(measurement);
+        Ok(())
+    })?;
+    measurements.sort_by_key(|measurement| measurement.timestamp);
+    Ok(measurements)
+}
+
+fn for_each_measurement(
+    directory: &Path,
+    mut visit: impl FnMut(StoredMeasurement) -> Result<(), String>,
+) -> Result<(), String> {
     let entries =
         fs::read_dir(directory).map_err(|error| format!("Kunne ikke læse måledata: {error}"))?;
-    for path in entries
+    let mut paths: Vec<_> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("csv"))
-    {
+        .filter(|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("csv")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("measurements-"))
+        })
+        .collect();
+    paths.sort();
+    for path in paths {
         let file =
             File::open(path).map_err(|error| format!("Kunne ikke læse målefilen: {error}"))?;
         for line in BufReader::new(file).lines().skip(1) {
             let line = line.map_err(|error| format!("Kunne ikke læse en måling: {error}"))?;
-            let fields = parse_csv_line(&line)?;
-            let timestamp = DateTime::parse_from_rfc3339(&fields[0])
-                .map_err(|error| format!("Ugyldigt måletidspunkt: {error}"))?
-                .with_timezone(&Utc);
-            let level_db = fields[2]
-                .parse()
-                .map_err(|error| format!("Ugyldigt lydniveau: {error}"))?;
-            let measurement = match fields.len() {
-                6 => StoredMeasurement {
-                    timestamp,
-                    device_id: fields[1].clone(),
-                    level_db,
-                    minimum_db: level_db,
-                    maximum_db: level_db,
-                    sample_count: 1,
-                    weighting: parse_optional(&fields[3])?,
-                    response: parse_optional(&fields[4])?,
-                    raw: fields[5].clone(),
-                },
-                9 => StoredMeasurement {
-                    timestamp,
-                    device_id: fields[1].clone(),
-                    level_db,
-                    minimum_db: fields[3]
-                        .parse()
-                        .map_err(|error| format!("Ugyldigt minimumsniveau: {error}"))?,
-                    maximum_db: fields[4]
-                        .parse()
-                        .map_err(|error| format!("Ugyldigt maksimumsniveau: {error}"))?,
-                    sample_count: fields[5]
-                        .parse()
-                        .map_err(|error| format!("Ugyldigt antal samples: {error}"))?,
-                    weighting: parse_optional(&fields[6])?,
-                    response: parse_optional(&fields[7])?,
-                    raw: fields[8].clone(),
-                },
-                _ => continue,
-            };
-            measurements.push(measurement);
+            if let Some(measurement) = parse_measurement_line(&line)? {
+                visit(measurement)?;
+            }
         }
     }
-    measurements.sort_by_key(|measurement| measurement.timestamp);
-    Ok(measurements)
+    Ok(())
+}
+
+fn parse_measurement_line(line: &str) -> Result<Option<StoredMeasurement>, String> {
+    let fields = parse_csv_line(line)?;
+    if fields.len() != 6 && fields.len() != 9 {
+        return Ok(None);
+    }
+    let timestamp = DateTime::parse_from_rfc3339(&fields[0])
+        .map_err(|error| format!("Ugyldigt måletidspunkt: {error}"))?
+        .with_timezone(&Utc);
+    let level_db = fields[2]
+        .parse()
+        .map_err(|error| format!("Ugyldigt lydniveau: {error}"))?;
+    Ok(Some(match fields.len() {
+        6 => StoredMeasurement {
+            timestamp,
+            device_id: fields[1].clone(),
+            level_db,
+            minimum_db: level_db,
+            maximum_db: level_db,
+            sample_count: 1,
+            weighting: parse_optional(&fields[3])?,
+            response: parse_optional(&fields[4])?,
+            raw: fields[5].clone(),
+        },
+        9 => StoredMeasurement {
+            timestamp,
+            device_id: fields[1].clone(),
+            level_db,
+            minimum_db: fields[3]
+                .parse()
+                .map_err(|error| format!("Ugyldigt minimumsniveau: {error}"))?,
+            maximum_db: fields[4]
+                .parse()
+                .map_err(|error| format!("Ugyldigt maksimumsniveau: {error}"))?,
+            sample_count: fields[5]
+                .parse()
+                .map_err(|error| format!("Ugyldigt antal samples: {error}"))?,
+            weighting: parse_optional(&fields[6])?,
+            response: parse_optional(&fields[7])?,
+            raw: fields[8].clone(),
+        },
+        _ => unreachable!(),
+    }))
+}
+
+fn summary_for_session(directory: &Path, session: &Session) -> Result<SessionSummary, String> {
+    if let Ok(payload) = fs::read(directory.join(SUMMARY_CACHE_FILE)) {
+        if let Ok(cached) = serde_json::from_slice::<CachedSummary>(&payload) {
+            if cached.cache_version == SUMMARY_CACHE_VERSION
+                && summary_matches_session(&cached.summary, session)
+            {
+                return Ok(cached.summary);
+            }
+        }
+    }
+    let summary = summarize(session, &read_measurements(directory)?);
+    if session.ended.is_some() {
+        let _ = write_summary_cache(directory, &summary);
+    }
+    Ok(summary)
+}
+
+fn refresh_summary_cache(directory: &Path, session: &Session) -> Result<(), String> {
+    let summary = summarize(session, &read_measurements(directory)?);
+    write_summary_cache(directory, &summary)
+}
+
+fn write_summary_cache(directory: &Path, summary: &SessionSummary) -> Result<(), String> {
+    let payload = serde_json::to_vec_pretty(&CachedSummary {
+        cache_version: SUMMARY_CACHE_VERSION,
+        summary: summary.clone(),
+    })
+    .map_err(|error| format!("Kunne ikke serialisere sessionsoversigten: {error}"))?;
+    let temporary = directory.join(format!("{SUMMARY_CACHE_FILE}.tmp"));
+    let destination = directory.join(SUMMARY_CACHE_FILE);
+    let mut file = File::create(&temporary)
+        .map_err(|error| format!("Kunne ikke skrive sessionsoversigten: {error}"))?;
+    file.write_all(&payload)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("Kunne ikke synkronisere sessionsoversigten: {error}"))?;
+    if destination.exists() {
+        fs::remove_file(&destination)
+            .map_err(|error| format!("Kunne ikke opdatere sessionsoversigten: {error}"))?;
+    }
+    fs::rename(temporary, destination)
+        .map_err(|error| format!("Kunne ikke færdiggøre sessionsoversigten: {error}"))
+}
+
+fn summary_matches_session(summary: &SessionSummary, session: &Session) -> bool {
+    summary.id == session.id
+        && summary.title == session.title
+        && summary.event_type == session.event_type
+        && summary.event_date == session.event_date
+        && summary.started == session.started
+        && summary.ended == session.ended
+        && summary.interrupted == session.interrupted
+        && summary.hidden == session.hidden
+        && summary.responsible_engineer_name == session.responsible_engineer_name
+        && summary.device_count == session.devices.len()
 }
 
 fn summarize(session: &Session, measurements: &[StoredMeasurement]) -> SessionSummary {
@@ -779,7 +1056,7 @@ fn parse_csv_line(line: &str) -> Result<Vec<String>, String> {
 mod tests {
     use std::fs;
 
-    use chrono::{Duration, Local, Timelike, Utc};
+    use chrono::{Datelike, Duration, Local, Timelike, Utc};
     use sound_monitor::measurement::{FrequencyWeighting, Measurement, TimeWeighting};
 
     use super::{
@@ -870,13 +1147,78 @@ mod tests {
         assert!(export_directory.join("measurements.csv").is_file());
         assert!(export_directory.join("markers.csv").is_file());
 
+        let measurements_csv = container.join("single-session.csv");
+        let result = store
+            .export_measurements_csv(std::slice::from_ref(&session.id), &measurements_csv)
+            .unwrap();
+        assert_eq!(result.session_count, 1);
+        assert_eq!(result.row_count, 1);
+        let payload = fs::read_to_string(measurements_csv).unwrap();
+        assert!(payload.contains("sessionId,sessionTitle"));
+        assert!(payload.contains("Soundcheck"));
+        assert!(payload.contains("N:071.4,hold"));
+
+        let statistics_csv = container.join("statistics.csv");
+        let result = store
+            .export_statistics_csv(std::slice::from_ref(&session.id), &statistics_csv)
+            .unwrap();
+        assert_eq!(result.row_count, 1);
+        let payload = fs::read_to_string(statistics_csv).unwrap();
+        assert!(payload.contains("durationSeconds,observedSeconds"));
+        assert!(payload.contains(",71.4,71.4,71.4,71.4,"));
+
         let hidden = store.set_hidden(&session.id, true).unwrap();
         assert!(hidden.hidden);
+        assert_eq!(
+            store
+                .export_statistics_csv(
+                    std::slice::from_ref(&session.id),
+                    &container.join("hidden.csv")
+                )
+                .unwrap_err(),
+            "Skjulte sessioner kan ikke eksporteres."
+        );
         assert!(store.list(false).unwrap().is_empty());
         assert!(store.list(true).unwrap()[0].hidden);
         let restored = store.set_hidden(&session.id, false).unwrap();
         assert!(!restored.hidden);
         assert_eq!(store.list(false).unwrap().len(), 1);
+
+        fs::remove_dir_all(container).unwrap();
+    }
+
+    #[test]
+    fn completed_session_summary_is_cached_and_reused() {
+        let container = std::env::temp_dir().join(format!(
+            "sound-monitor-summary-cache-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let root = container.join("Sessions");
+        let store = SessionStore::new(root.clone()).unwrap();
+        let session = store
+            .start(StartSessionRequest {
+                title: "Cached session".to_owned(),
+                event_type: "service".to_owned(),
+                event_date: Local::now().date_naive(),
+                responsible_engineer_name: None,
+                devices: Vec::new(),
+            })
+            .unwrap();
+        store.record(&measurement(Utc::now(), 83.2)).unwrap();
+        store.stop().unwrap();
+
+        let directory = root
+            .join(session.event_date.year().to_string())
+            .join(&session.id);
+        assert!(directory.join(super::SUMMARY_CACHE_FILE).is_file());
+        fs::write(
+            directory.join("measurements-digital-sound-8922-test.csv"),
+            "timestamp,deviceId,levelDb\ninvalid,row\n",
+        )
+        .unwrap();
+
+        let summary = store.list(false).unwrap().remove(0);
+        assert_eq!(summary.leq_db, Some(83.2));
 
         fs::remove_dir_all(container).unwrap();
     }

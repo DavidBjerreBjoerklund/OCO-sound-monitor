@@ -151,6 +151,12 @@ export interface ExportResult {
   files: string[];
 }
 
+export interface CsvExportResult {
+  path: string;
+  sessionCount: number;
+  rowCount: number;
+}
+
 export interface AggregatePoint {
   positionPercent: number;
   lowerDb: number;

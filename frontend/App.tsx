@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useState } from "react";
 import {
   Activity, Archive, Cable, CalendarDays, Check, Circle, Clock3, Download, Eye, EyeOff,
-  ChartNoAxesCombined, Flag, FolderOpen, Gauge, HardDrive, Plus, Plug, RefreshCw, Search, Square,
+  ChartNoAxesCombined, Flag, FolderOpen, Gauge, HardDrive, Package, Plus, Plug, RefreshCw, Search, Square,
   Users, Wifi, WifiOff, X,
 } from "lucide-react";
 import {
@@ -9,7 +9,8 @@ import {
   Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  addMarker, compareSessions, connectDevice, disconnectDevice, exportSession,
+  addMarker, compareSessions, connectDevice, disconnectDevice, exportMeasurementsCsv, exportSession,
+  exportStatisticsCsv,
   getSettings, isDesktopRuntime, libraryLocation, listDevices, listSessions, loadSession, startSession,
   stopSession, suggestSession, setSessionHidden,
 } from "./bridge";
@@ -33,6 +34,11 @@ function formatChartTime(timestamp: string, language: Language): string {
 
 function formatDate(value: string, language: Language): string {
   return new Intl.DateTimeFormat(localeFor(language), { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T12:00:00`));
+}
+
+function exportFilename(value: string): string {
+  const normalized = value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+  return normalized.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "sound-monitor";
 }
 
 function duration(started: string, ended: string | null, language: Language): string {
@@ -192,6 +198,7 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [hideCandidate, setHideCandidate] = useState<Session | null>(null);
   const [hideBusy, setHideBusy] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
   const language: Language = settings?.language ?? "da";
 
   const refreshDevices = useCallback(async () => {
@@ -308,11 +315,41 @@ function App() {
     } catch (reason) { setError(String(reason)); }
   };
 
-  const handleExport = async () => {
+  const handlePackageExport = async () => {
     if (!selectedSession) return;
     try {
+      setExportBusy(true);
       const result = await exportSession(selectedSession.session.id);
       setNotice(`${translate(language, "exportedPrefix")} ${result.directory}`);
+    } catch (reason) { setError(String(reason)); }
+    finally { setExportBusy(false); }
+  };
+
+  const handleMeasurementExport = async () => {
+    if (!selectedSession) return;
+    try {
+      setExportBusy(true);
+      const session = selectedSession.session;
+      const result = await exportMeasurementsCsv(
+        [session.id],
+        `${exportFilename(`${session.eventDate}-${session.title}`)}.csv`,
+      );
+      if (result) setNotice(`${translate(language, "exportedPrefix")} ${result.path}`);
+    } catch (reason) { setError(String(reason)); }
+    finally { setExportBusy(false); }
+  };
+
+  const handleFilteredMeasurementExport = async (ids: string[]) => {
+    try {
+      const result = await exportMeasurementsCsv(ids, `sound-monitor-measurements-${new Date().toISOString().slice(0, 10)}.csv`);
+      if (result) setNotice(`${translate(language, "exportedPrefix")} ${result.path}`);
+    } catch (reason) { setError(String(reason)); }
+  };
+
+  const handleFilteredStatisticsExport = async (ids: string[]) => {
+    try {
+      const result = await exportStatisticsCsv(ids, `sound-monitor-statistics-${new Date().toISOString().slice(0, 10)}.csv`);
+      if (result) setNotice(`${translate(language, "exportedPrefix")} ${result.path}`);
     } catch (reason) { setError(String(reason)); }
   };
 
@@ -428,7 +465,7 @@ function App() {
         <div className="archive-list">{filteredArchive.map((session) => <button type="button" className={`archive-row ${session.hidden ? "hidden" : ""} ${selectedSession?.session.id === session.id ? "active" : ""}`} key={session.id} onClick={() => void selectArchiveSession(session.id)}><span className="archive-row-date">{formatDate(session.eventDate, language)}{session.hidden ? ` · ${translate(language, "hidden")}` : ""}</span><strong>{session.title}</strong><span>{eventLabels[session.eventType] ?? session.eventType} · {session.sampleCount.toLocaleString(locale)} {translate(language, "samples")}{session.interrupted ? ` · ${translate(language, "interrupted")}` : ""}</span></button>)}{!filteredArchive.length && <div className="archive-empty"><Archive size={24} /><span>{translate(language, "archiveEmpty")}</span></div>}</div>
       </aside>
       <section className="archive-detail">{selectedSession ? <>
-        <div className="archive-detail-header"><div><span className="eyebrow">{eventLabels[selectedSession.session.eventType] ?? selectedSession.session.eventType}</span><h1>{selectedSession.session.title}</h1></div><div className="archive-header-actions"><div className="archive-date"><CalendarDays size={15} />{formatDate(selectedSession.session.eventDate, language)}</div><button className="export-button" type="button" onClick={() => void handleExport()}><Download size={15} /> {translate(language, "export")}</button></div></div>
+        <div className="archive-detail-header"><div><span className="eyebrow">{eventLabels[selectedSession.session.eventType] ?? selectedSession.session.eventType}</span><h1>{selectedSession.session.title}</h1></div><div className="archive-header-actions"><div className="archive-date"><CalendarDays size={15} />{formatDate(selectedSession.session.eventDate, language)}</div>{!selectedSession.session.hidden && <><button className="export-button" type="button" onClick={() => void handleMeasurementExport()} disabled={exportBusy}><Download size={15} /> {translate(language, "measurementData")}</button><button className="icon-button" type="button" onClick={() => void handlePackageExport()} disabled={exportBusy} aria-label={translate(language, "completePackage")} title={translate(language, "completePackage")}><Package size={15} /></button></>}</div></div>
         <Chart language={language} measurements={selectedSession.measurements} markers={selectedSession.session.markers} emptyText={translate(language, "sessionContainsNoMeasurements")} />
         <Stats language={language} measurements={selectedSession.measurements} />
       </> : <div className="detail-empty"><FolderOpen size={32} /><h2>{translate(language, "viewSession")}</h2><span>{translate(language, "measurementsAppearHere")}</span></div>}</section>
@@ -437,7 +474,7 @@ function App() {
         {selectedSession ? <><div className="metadata-list"><div><span><Clock3 size={13} /> {translate(language, "duration")}</span><strong>{duration(selectedSession.session.started, selectedSession.session.ended, language)}</strong></div>{selectedSession.session.interrupted && <div className="recovered-session"><span><RefreshCw size={13} /> {translate(language, "status")}</span><strong>{translate(language, "interruptedFull")}</strong></div>}{selectedSession.session.hidden && <div className="hidden-session"><span><EyeOff size={13} /> {translate(language, "status")}</span><strong>{translate(language, "hidden")}</strong></div>}<div><span><Users size={13} /> {translate(language, "audioEngineer")}</span><strong>{selectedSession.session.responsibleEngineerName || translate(language, "notSpecified")}</strong></div><div><span><Cable size={13} /> {translate(language, "devices")}</span><strong>{selectedSession.session.devices.length}</strong></div>{selectedSession.session.devices.map((device) => <div className="device-record" key={device.id}><span>{device.name}</span><strong>dB{device.weighting ?? "?"} · {device.response ?? translate(language, "unknown")}</strong></div>)}</div><div className="marker-list"><div className="marker-list-heading"><Flag size={13} /><span>{translate(language, "markers")}</span><strong>{selectedSession.session.markers.length}</strong></div>{selectedSession.session.markers.map((marker) => <div className="marker-row" key={marker.id}><time>{formatChartTime(marker.timestamp, language)}</time><strong>{marker.label}</strong>{marker.note && <span>{marker.note}</span>}</div>)}{!selectedSession.session.markers.length && <span className="no-markers">{translate(language, "noMarkers")}</span>}</div>{selectedSession.session.hidden ? <button className="archive-session-action restore" type="button" onClick={() => void handleRestore()}><Eye size={15} /> {translate(language, "showSession")}</button> : <button className="archive-session-action" type="button" onClick={() => setHideCandidate(selectedSession.session)}><EyeOff size={15} /> {translate(language, "hide")}</button>}</> : null}
         <div className="library-path"><span>{translate(language, "libraryLocation")}</span><code title={archivePath}>{archivePath || translate(language, "loading")}</code></div>
       </aside>
-    </main> : <StatisticsView language={language} sessions={archive.filter((session) => !session.hidden)} classifications={classifications} onRefresh={async () => { setArchive(await listSessions(false)); }} onOpenSession={openArchiveSession} loadComparison={compareSessions} />}
+    </main> : <StatisticsView language={language} sessions={archive.filter((session) => !session.hidden)} classifications={classifications} onRefresh={async () => { setArchive(await listSessions(false)); }} onOpenSession={openArchiveSession} loadComparison={compareSessions} onExportMeasurements={handleFilteredMeasurementExport} onExportStatistics={handleFilteredStatisticsExport} />}
     {hideCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !hideBusy) setHideCandidate(null); }}>
       <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="hide-dialog-title">
         <div className="confirm-dialog-header"><div className="hide-icon"><EyeOff size={18} /></div><button className="icon-button" type="button" onClick={() => setHideCandidate(null)} disabled={hideBusy} aria-label={translate(language, "close")} title={translate(language, "close")}><X size={16} /></button></div>

@@ -11,13 +11,14 @@ use sound_monitor::session::SessionDraft;
 use sound_monitor::template::{
     apply_template_defaults, default_sunday_service_template, matching_templates,
 };
+use std::path::PathBuf;
 use tauri::{Manager, State};
 
 use manager::{ConnectOptions, DeviceEvent, DeviceManager};
 use settings::AppSettings;
 use statistics::ComparisonSeries;
 use storage::{
-    AddMarkerRequest, ExportResult, SessionDetail, SessionStore, SessionSummary,
+    AddMarkerRequest, CsvExportResult, ExportResult, SessionDetail, SessionStore, SessionSummary,
     StartSessionRequest,
 };
 
@@ -140,6 +141,24 @@ fn export_session(state: State<'_, SessionStore>, id: String) -> Result<ExportRe
 }
 
 #[tauri::command]
+fn export_measurements_csv(
+    state: State<'_, SessionStore>,
+    ids: Vec<String>,
+    path: String,
+) -> Result<CsvExportResult, String> {
+    state.export_measurements_csv(&ids, &PathBuf::from(path))
+}
+
+#[tauri::command]
+fn export_statistics_csv(
+    state: State<'_, SessionStore>,
+    ids: Vec<String>,
+    path: String,
+) -> Result<CsvExportResult, String> {
+    state.export_statistics_csv(&ids, &PathBuf::from(path))
+}
+
+#[tauri::command]
 fn set_session_hidden(
     state: State<'_, SessionStore>,
     id: String,
@@ -196,6 +215,7 @@ fn build_session_suggestion(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(DeviceManager::default())
         .setup(|app| {
             let resource_dir = app
@@ -225,6 +245,8 @@ pub fn run() {
             library_location,
             add_marker,
             export_session,
+            export_measurements_csv,
+            export_statistics_csv,
             set_session_hidden
         ])
         .build(tauri::generate_context!())

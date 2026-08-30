@@ -46,6 +46,7 @@ The LIVE workspace currently provides:
 - one energy-based storage bucket per device and second, preserving Leq,
   minimum, maximum, and the original sample count,
 - append-only per-device CSV measurement files flushed in five-bucket batches,
+- cached, rebuildable `summary.json` statistics for fast archive and filter loading,
 - JSON metadata with explicit A/C/D/Z and Fast/Slow settings,
 - searchable archive with session graph, statistics, devices, and engineer.
 - dedicated Statistics workspace with date, event, engineer, measurement-profile,
@@ -59,6 +60,8 @@ The LIVE workspace currently provides:
 - marker lines and annotations on live and historical graphs,
 - portable exports containing `session.json`, `measurements.csv`, and
   `markers.csv`,
+- streamed single- and bulk-session CSV exports of measurement rows,
+- filtered Statistics exports with one compact summary row per session,
 - reversible hiding of erroneous recordings from Archive and Statistics, with a
   dedicated hidden-session view for restoration,
 - Digital Sound 8922 startup-zero filtering before live display and storage,
@@ -67,7 +70,8 @@ The LIVE workspace currently provides:
 
 Sessions are stored below the platform-specific application data directory in
 `Sound Monitor/Sessions/<year>/<session-id>/`. Each folder contains a
-`session.json` file and one CSV file per device that produced measurements.
+`session.json` file, a rebuildable `summary.json` cache, and one CSV file per
+device that produced measurements.
 On first launch, the bundled `sound-monitor.ini` is copied directly into the
 `Sessions` directory. This active settings file contains the local service start
 time and the ordered list of classifications shown in the application:
@@ -100,8 +104,10 @@ later in the service window are suggested as services. Existing INI files withou
 Existing sessions retain their stable stored classification ID if its INI entry is
 later removed. Legacy files with a single `[classifications]` section remain valid
 and default to Danish.
-Exports are written beside `Sessions` in the platform-specific `Exports`
-directory, with a separate timestamped folder for each export operation.
+Complete data packages are written beside `Sessions` in the platform-specific
+`Exports` directory. Measurement and Statistics CSV exports use the native save
+dialog; bulk measurement exports are streamed to disk without loading all rows
+into memory.
 Legacy six-column measurement files remain readable. New files use the columns
 `timestamp`, `deviceId`, `levelDb`, `minimumDb`, `maximumDb`, `sampleCount`,
 `weighting`, `response`, and `raw`; `levelDb` is the energy-based Leq for that

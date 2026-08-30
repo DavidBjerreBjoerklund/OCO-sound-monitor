@@ -317,6 +317,11 @@ button {
   background: #303632;
 }
 
+.export-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .archive-session-action {
   display: flex;
   align-items: center;
@@ -1282,6 +1287,12 @@ h2 {
   gap: 9px;
 }
 
+.statistics-export-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .statistics-view-tabs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1617,6 +1628,12 @@ h2 {
   .statistics-content {
     padding-right: 16px;
     padding-left: 16px;
+  }
+
+  .statistics-export-actions .export-button {
+    width: 32px;
+    padding: 0;
+    font-size: 0;
   }
 
   .statistics-filters {

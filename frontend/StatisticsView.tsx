@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { BarChart3, RefreshCw } from "lucide-react";
+import { BarChart3, Download, RefreshCw, TableProperties } from "lucide-react";
 import {
   Area, AreaChart, CartesianGrid, Line, ReferenceLine, ResponsiveContainer,
   Tooltip, XAxis, YAxis,
@@ -14,6 +14,8 @@ interface StatisticsViewProps {
   onRefresh: () => Promise<void>;
   onOpenSession: (id: string) => Promise<void>;
   loadComparison: (ids: string[]) => Promise<ComparisonSeries>;
+  onExportMeasurements: (ids: string[]) => Promise<void>;
+  onExportStatistics: (ids: string[]) => Promise<void>;
 }
 
 type ViewMode = "profiles" | "aggregate";
@@ -108,7 +110,7 @@ function AggregateProfile({ comparison, language }: { comparison: ComparisonSeri
   </div>;
 }
 
-export default function StatisticsView({ sessions, classifications, language, onRefresh, onOpenSession, loadComparison }: StatisticsViewProps) {
+export default function StatisticsView({ sessions, classifications, language, onRefresh, onOpenSession, loadComparison, onExportMeasurements, onExportStatistics }: StatisticsViewProps) {
   const [view, setView] = useState<ViewMode>("profiles");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -120,6 +122,7 @@ export default function StatisticsView({ sessions, classifications, language, on
   const [comparison, setComparison] = useState<ComparisonSeries | null>(null);
   const [comparisonBusy, setComparisonBusy] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
+  const [exportBusy, setExportBusy] = useState<"measurements" | "statistics" | null>(null);
   const classificationOptions = useMemo(() => {
     const configured = new Set(classifications.map((classification) => classification.id));
     const legacy = [...new Set(sessions
@@ -164,10 +167,25 @@ export default function StatisticsView({ sessions, classifications, language, on
     setProfile("all"); setMinimumMaximum(""); setMinimumRedMinutes("");
   };
 
+  const exportFiltered = async (kind: "measurements" | "statistics") => {
+    if (!filtered.length) return;
+    setExportBusy(kind);
+    try {
+      const ids = filtered.map((session) => session.id);
+      await (kind === "measurements" ? onExportMeasurements(ids) : onExportStatistics(ids));
+    } finally {
+      setExportBusy(null);
+    }
+  };
+
   return <main className="statistics-workspace">
     <header className="statistics-header">
       <div><span className="eyebrow">{translate(language, "analysis")}</span><h1>{translate(language, "statistics")}</h1><p>{filtered.length} {translate(language, "eventsShownConnector")} {sessions.length} {translate(language, "sessionUnit")}</p></div>
       <div className="statistics-header-actions">
+        <div className="statistics-export-actions">
+          <button className="export-button" type="button" disabled={!filtered.length || exportBusy !== null} onClick={() => void exportFiltered("measurements")}><Download size={14} />{translate(language, "measurementData")}</button>
+          <button className="export-button" type="button" disabled={!filtered.length || exportBusy !== null} onClick={() => void exportFiltered("statistics")}><TableProperties size={14} />{translate(language, "sessionOverview")}</button>
+        </div>
         <div className="statistics-view-tabs" role="group" aria-label={translate(language, "statisticsView")}>
           <button type="button" className={view === "profiles" ? "active" : ""} onClick={() => setView("profiles")}>{translate(language, "sessionProfiles")}</button>
           <button type="button" className={view === "aggregate" ? "active" : ""} disabled={!aggregateAvailable} onClick={() => setView("aggregate")}>{translate(language, "aggregateCourse")}</button>

@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import type {
   DeviceDescriptor,
   DeviceEvent,
@@ -10,6 +11,7 @@ import type {
   StartSessionRequest,
   Marker,
   ExportResult,
+  CsvExportResult,
   TimeWeighting,
   ComparisonSeries,
   AppSettings,
@@ -310,6 +312,39 @@ export async function exportSession(id: string): Promise<ExportResult> {
     directory: `Preview-hukommelse/Exports/${id}`,
     files: ["session.json", "measurements.csv", "markers.csv"],
   };
+}
+
+async function chooseCsvPath(defaultPath: string): Promise<string | null> {
+  if (!isDesktopRuntime()) return `Preview-hukommelse/Exports/${defaultPath}`;
+  return save({
+    defaultPath,
+    filters: [{ name: "CSV", extensions: ["csv"] }],
+  });
+}
+
+export async function exportMeasurementsCsv(
+  ids: string[],
+  defaultPath: string,
+): Promise<CsvExportResult | null> {
+  const path = await chooseCsvPath(defaultPath);
+  if (!path) return null;
+  if (isDesktopRuntime()) {
+    return invoke<CsvExportResult>("export_measurements_csv", { ids, path });
+  }
+  const rowCount = ids.reduce((count, id) => count + (mockArchive.get(id)?.measurements.length ?? 0), 0);
+  return { path, sessionCount: ids.length, rowCount };
+}
+
+export async function exportStatisticsCsv(
+  ids: string[],
+  defaultPath: string,
+): Promise<CsvExportResult | null> {
+  const path = await chooseCsvPath(defaultPath);
+  if (!path) return null;
+  if (isDesktopRuntime()) {
+    return invoke<CsvExportResult>("export_statistics_csv", { ids, path });
+  }
+  return { path, sessionCount: ids.length, rowCount: ids.length };
 }
 
 export async function setSessionHidden(id: string, hidden: boolean): Promise<Session> {
