@@ -1,0 +1,52 @@
+name: Build Fedora RPM
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rpm:
+    name: Fedora 42 x64 RPM
+    runs-on: ubuntu-latest
+    container: fedora:42
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y \
+            cargo \
+            file \
+            gcc \
+            gcc-c++ \
+            git \
+            gtk3-devel \
+            libappindicator-gtk3-devel \
+            librsvg2-devel \
+            libxdo-devel \
+            make \
+            nodejs \
+            npm \
+            openssl-devel \
+            pkgconf-pkg-config \
+            rpm-build \
+            rust \
+            systemd-devel \
+            webkit2gtk4.1-devel
+
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build RPM
+        run: npm run tauri build -- --bundles rpm
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sound-Monitor-0.1.0-Fedora-x64-RPM
+          path: target/release/bundle/rpm/*.rpm
+          if-no-files-found: error
