@@ -29,19 +29,27 @@ export function isDesktopRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
 }
 
+function previewLanguage(): "da" | "en" {
+  return new URLSearchParams(window.location.search).get("lang") === "en" ? "en" : "da";
+}
+
 export async function getSettings(): Promise<AppSettings> {
   if (isDesktopRuntime()) return invoke<AppSettings>("get_settings");
+  const language = previewLanguage();
   return {
+    language,
     serviceStartTime: "10:30",
     filePath: "Preview-hukommelse/Sessions/sound-monitor.ini",
-    classifications: [
-      { id: "service", label: "Gudstjeneste" },
-      { id: "worship-night", label: "Lovsangsaften" },
-      { id: "concert", label: "Koncert" },
-      { id: "conference", label: "Konference" },
-      { id: "rehearsal", label: "Prøve" },
-      { id: "soundcheck", label: "Lydprøve" },
+    classifications: language === "da" ? [
+      { id: "service", label: "Gudstjeneste" }, { id: "worship-night", label: "Lovsangsaften" },
+      { id: "concert", label: "Koncert" }, { id: "conference", label: "Konference" },
+      { id: "rehearsal", label: "Prøve" }, { id: "soundcheck", label: "Lydprøve" },
       { id: "special", label: "Særligt event" },
+    ] : [
+      { id: "service", label: "Service" }, { id: "worship-night", label: "Worship night" },
+      { id: "concert", label: "Concert" }, { id: "conference", label: "Conference" },
+      { id: "rehearsal", label: "Rehearsal" }, { id: "soundcheck", label: "Soundcheck" },
+      { id: "special", label: "Special event" },
     ],
   };
 }
@@ -170,9 +178,10 @@ export async function suggestSession(): Promise<SessionSuggestion> {
     return invoke<SessionSuggestion>("suggest_session", { nowIso: null });
   }
 
+  const english = previewLanguage() === "en";
   return {
     draft: {
-      title: "Gudstjeneste",
+      title: english ? "Service" : "Gudstjeneste",
       eventType: "service",
       date: new Date().toISOString().slice(0, 10),
       responsibleEngineerId: null,

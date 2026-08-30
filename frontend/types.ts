@@ -14,6 +14,7 @@ export interface Classification {
 }
 
 export interface AppSettings {
+  language: "da" | "en";
   serviceStartTime: string;
   classifications: Classification[];
   filePath: string;

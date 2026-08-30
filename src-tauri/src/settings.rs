@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,7 @@ pub struct Classification {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
+    pub language: String,
     pub service_start_time: String,
     pub classifications: Vec<Classification>,
     pub file_path: String,
@@ -68,8 +69,9 @@ fn find_packaged_settings(resource_dir: &Path) -> Option<PathBuf> {
 
 fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
     let mut section = "";
+    let mut language = "da".to_owned();
     let mut service_start_time = None;
-    let mut classifications = Vec::new();
+    let mut classification_sets: HashMap<String, Vec<Classification>> = HashMap::new();
 
     for (line_index, raw_line) in contents.lines().enumerate() {
         let line = raw_line.trim();
@@ -98,13 +100,36 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
         }
 
         match section {
+            "general" if key == "language" => language = value.to_ascii_lowercase(),
             "service" if key == "start_time" => service_start_time = Some(value.to_owned()),
-            "classifications" => classifications.push(Classification {
-                id: key.to_owned(),
-                label: value.to_owned(),
-            }),
+            "classifications" => classification_sets
+                .entry("default".to_owned())
+                .or_default()
+                .push(Classification {
+                    id: key.to_owned(),
+                    label: value.to_owned(),
+                }),
+            section_name if section_name.starts_with("classifications.") => classification_sets
+                .entry(
+                    section_name
+                        .trim_start_matches("classifications.")
+                        .to_owned(),
+                )
+                .or_default()
+                .push(Classification {
+                    id: key.to_owned(),
+                    label: value.to_owned(),
+                }),
             _ => {}
         }
+    }
+
+    if !matches!(language.as_str(), "da" | "en") {
+        return Err(format!(
+            "Ugyldigt [general] language '{}' i {}. Brug da eller en.",
+            language,
+            path.display()
+        ));
     }
 
     let service_start_time = service_start_time
@@ -115,6 +140,15 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
             path.display()
         )
     })?;
+    let mut classifications = classification_sets
+        .remove(&language)
+        .or_else(|| classification_sets.remove("default"))
+        .ok_or_else(|| {
+            format!(
+                "{} mangler [classifications.{language}] eller [classifications].",
+                path.display()
+            )
+        })?;
     if classifications.is_empty() {
         return Err(format!(
             "{} skal indeholde mindst én [classifications]-værdi.",
@@ -138,6 +172,7 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
     classifications.retain(|classification| seen_ids.insert(classification.id.clone()));
 
     Ok(AppSettings {
+        language,
         service_start_time,
         classifications,
         file_path: path.display().to_string(),
@@ -170,14 +205,28 @@ mod tests {
     #[test]
     fn parses_service_time_and_ordered_classifications() {
         let settings = parse_settings(
-            "[service]\nstart_time = 09:45\n\n[classifications]\nservice = Gudstjeneste\nsoundcheck = Lydprøve\n",
+            "[general]\nlanguage = en\n[service]\nstart_time = 09:45\n\n[classifications.da]\nservice = Gudstjeneste\n[classifications.en]\nservice = Service\nsoundcheck = Soundcheck\n",
             Path::new("test.ini"),
         )
         .unwrap();
 
         assert_eq!(settings.service_start_minutes(), 9 * 60 + 45);
+        assert_eq!(settings.language, "en");
         assert_eq!(settings.classifications[0].id, "service");
-        assert_eq!(settings.classifications[1].label, "Lydprøve");
+        assert_eq!(settings.classifications[0].label, "Service");
+        assert_eq!(settings.classifications[1].label, "Soundcheck");
+    }
+
+    #[test]
+    fn legacy_classifications_default_to_danish() {
+        let settings = parse_settings(
+            "[service]\nstart_time = 10:30\n[classifications]\nservice = Gudstjeneste\n",
+            Path::new("test.ini"),
+        )
+        .unwrap();
+
+        assert_eq!(settings.language, "da");
+        assert_eq!(settings.classifications[0].label, "Gudstjeneste");
     }
 
     #[test]

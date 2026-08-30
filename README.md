@@ -73,17 +73,28 @@ On first launch, the bundled `sound-monitor.ini` is copied directly into the
 time and the ordered list of classifications shown in the application:
 
 ```ini
+[general]
+language = da
+
 [service]
 start_time = 10:30
 
-[classifications]
+[classifications.da]
 service = Gudstjeneste
 soundcheck = Lydprøve
+
+[classifications.en]
+service = Service
+soundcheck = Soundcheck
 ```
 
 Classification identifiers use ASCII letters, digits, and hyphens, while labels
-may use normal UTF-8 text. Restart Sound Monitor after editing the file. Existing
-sessions retain their stored classification if its INI entry is later removed.
+may use normal UTF-8 text. Set `language` to `da` or `en`, then restart Sound
+Monitor. The interface, locale-aware date and number formatting, automatic service
+title, marker presets, and classification labels follow the selected language.
+Existing sessions retain their stable stored classification ID if its INI entry is
+later removed. Legacy files with a single `[classifications]` section remain valid
+and default to Danish.
 Exports are written beside `Sessions` in the platform-specific `Exports`
 directory, with a separate timestamped folder for each export operation.
 Legacy six-column measurement files remain readable. New files use the columns

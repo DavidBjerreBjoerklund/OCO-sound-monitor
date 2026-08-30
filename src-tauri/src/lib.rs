@@ -66,7 +66,17 @@ fn suggest_session(
         None => Local::now().fixed_offset(),
     };
 
-    Ok(build_session_suggestion(now, state.service_start_minutes()))
+    let service_title = state
+        .classifications
+        .iter()
+        .find(|classification| classification.id == "service")
+        .map(|classification| classification.label.as_str())
+        .unwrap_or("Service");
+    Ok(build_session_suggestion(
+        now,
+        state.service_start_minutes(),
+        service_title,
+    ))
 }
 
 #[tauri::command]
@@ -126,6 +136,7 @@ fn delete_session(state: State<'_, SessionStore>, id: String) -> Result<(), Stri
 fn build_session_suggestion(
     now: DateTime<FixedOffset>,
     service_start_minutes: u16,
+    service_title: &str,
 ) -> SessionSuggestion {
     let mut service_template = default_sunday_service_template();
     let duration = service_template
@@ -133,6 +144,7 @@ fn build_session_suggestion(
         .saturating_sub(service_template.expected_start_minutes);
     service_template.expected_start_minutes = service_start_minutes;
     service_template.expected_end_minutes = (service_start_minutes + duration) % (24 * 60);
+    service_template.default_title = service_title.to_owned();
     let templates = [service_template];
     let matches = matching_templates(&templates, now);
     let matched_template_ids = matches.iter().map(|template| template.id.clone()).collect();
@@ -216,7 +228,7 @@ mod tests {
     fn suggestion_uses_the_rust_template_matcher() {
         let timezone = FixedOffset::east_opt(2 * 60 * 60).unwrap();
         let now = timezone.with_ymd_and_hms(2026, 8, 30, 10, 27, 0).unwrap();
-        let suggestion = build_session_suggestion(now, 10 * 60 + 30);
+        let suggestion = build_session_suggestion(now, 10 * 60 + 30, "Gudstjeneste");
 
         assert_eq!(suggestion.draft.title.as_deref(), Some("Gudstjeneste"));
         assert_eq!(suggestion.draft.event_type.as_deref(), Some("service"));
@@ -228,9 +240,10 @@ mod tests {
         let timezone = FixedOffset::east_opt(2 * 60 * 60).unwrap();
         let now = timezone.with_ymd_and_hms(2026, 8, 30, 9, 30, 0).unwrap();
 
-        let suggestion = build_session_suggestion(now, 9 * 60 + 30);
+        let suggestion = build_session_suggestion(now, 9 * 60 + 30, "Service");
 
         assert_eq!(suggestion.draft.event_type.as_deref(), Some("service"));
+        assert_eq!(suggestion.draft.title.as_deref(), Some("Service"));
         assert_eq!(suggestion.matched_template_ids, ["sunday-service"]);
     }
 }
