@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useId, useState } from "react";
 import {
-  Activity, Archive, Cable, CalendarDays, Check, Circle, Clock3, Download,
+  Activity, Archive, Cable, CalendarDays, Check, Circle, Clock3, Download, EyeOff,
   ChartNoAxesCombined, Flag, FolderOpen, Gauge, HardDrive, Plus, Plug, RefreshCw, Search, Square,
-  Trash2, Users, Wifi, WifiOff, X,
+  Undo2, Users, Wifi, WifiOff, X,
 } from "lucide-react";
 import {
   CartesianGrid, Line, LineChart, ReferenceArea, ReferenceLine, ResponsiveContainer,
   Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  addMarker, compareSessions, connectDevice, deleteSession, disconnectDevice, exportSession,
+  addMarker, compareSessions, connectDevice, disconnectDevice, exportSession,
   getSettings, isDesktopRuntime, libraryLocation, listDevices, listSessions, loadSession, startSession,
-  stopSession, suggestSession,
+  stopSession, suggestSession, setSessionHidden,
 } from "./bridge";
 import type {
   AppSettings, ConnectionStatus, DeviceDescriptor, DeviceEvent, FrequencyWeighting,
@@ -171,13 +171,14 @@ function App() {
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [archive, setArchive] = useState<SessionSummary[]>([]);
   const [archiveSearch, setArchiveSearch] = useState("");
+  const [showHidden, setShowHidden] = useState(false);
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
   const [archivePath, setArchivePath] = useState("");
   const [markerLabel, setMarkerLabel] = useState("");
   const [markerNote, setMarkerNote] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
-  const [deleteCandidate, setDeleteCandidate] = useState<Session | null>(null);
-  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [hideCandidate, setHideCandidate] = useState<Session | null>(null);
+  const [hideBusy, setHideBusy] = useState(false);
   const language: Language = settings?.language ?? "da";
 
   const refreshDevices = useCallback(async () => {
@@ -190,11 +191,11 @@ function App() {
 
   const refreshArchive = useCallback(async (selectNewest = false) => {
     try {
-      const sessions = await listSessions();
+      const sessions = await listSessions(showHidden);
       setArchive(sessions);
       if (selectNewest && sessions[0]) setSelectedSession(await loadSession(sessions[0].id));
     } catch (reason) { setError(String(reason)); }
-  }, []);
+  }, [showHidden]);
 
   useEffect(() => {
     void refreshDevices();
@@ -264,7 +265,9 @@ function App() {
   };
 
   const openStatistics = async () => {
-    setMode("statistics"); await refreshArchive();
+    setMode("statistics");
+    try { setArchive(await listSessions(false)); }
+    catch (reason) { setError(String(reason)); }
   };
 
   const selectArchiveSession = async (id: string) => {
@@ -300,24 +303,45 @@ function App() {
     } catch (reason) { setError(String(reason)); }
   };
 
-  const handleDelete = async () => {
-    if (!deleteCandidate) return;
-    const deletedTitle = deleteCandidate.title;
+  const handleHide = async () => {
+    if (!hideCandidate) return;
+    const hiddenTitle = hideCandidate.title;
     try {
-      setDeleteBusy(true);
+      setHideBusy(true);
       setError(null);
-      await deleteSession(deleteCandidate.id);
-      setDeleteCandidate(null);
+      await setSessionHidden(hideCandidate.id, true);
+      setHideCandidate(null);
       setSelectedSession(null);
-      const sessions = await listSessions();
+      const sessions = await listSessions(showHidden);
       setArchive(sessions);
       if (sessions[0]) setSelectedSession(await loadSession(sessions[0].id));
-      setNotice(`${translate(language, "deletedPrefix")} ${deletedTitle}`);
+      setNotice(`${translate(language, "hiddenPrefix")} ${hiddenTitle}`);
     } catch (reason) {
       setError(String(reason));
     } finally {
-      setDeleteBusy(false);
+      setHideBusy(false);
     }
+  };
+
+  const handleRestore = async () => {
+    if (!selectedSession?.session.hidden) return;
+    const restoredTitle = selectedSession.session.title;
+    try {
+      setError(null);
+      const restored = await setSessionHidden(selectedSession.session.id, false);
+      setSelectedSession((detail) => detail ? { ...detail, session: restored } : detail);
+      setArchive(await listSessions(showHidden));
+      setNotice(`${translate(language, "restoredPrefix")} ${restoredTitle}`);
+    } catch (reason) { setError(String(reason)); }
+  };
+
+  const handleShowHidden = async (checked: boolean) => {
+    setShowHidden(checked);
+    try {
+      const sessions = await listSessions(checked);
+      setArchive(sessions);
+      if (selectedSession?.session.hidden && !checked) setSelectedSession(null);
+    } catch (reason) { setError(String(reason)); }
   };
 
   const classifications = settings?.classifications ?? [];
@@ -387,7 +411,8 @@ function App() {
       <aside className="archive-list-panel">
         <div className="archive-list-heading"><div><span className="eyebrow">{translate(language, "library")}</span><h2>{translate(language, "sessions")}</h2></div><button className="icon-button" type="button" onClick={() => void refreshArchive()} aria-label={translate(language, "archiveReload")} title={translate(language, "archiveReload")}><RefreshCw size={16} /></button></div>
         <label className="search-field"><Search size={15} /><input value={archiveSearch} onChange={(event) => setArchiveSearch(event.target.value)} placeholder={translate(language, "archiveSearch")} aria-label={translate(language, "archiveSearch")} /></label>
-        <div className="archive-list">{filteredArchive.map((session) => <button type="button" className={`archive-row ${selectedSession?.session.id === session.id ? "active" : ""}`} key={session.id} onClick={() => void selectArchiveSession(session.id)}><span className="archive-row-date">{formatDate(session.eventDate, language)}</span><strong>{session.title}</strong><span>{eventLabels[session.eventType] ?? session.eventType} · {session.sampleCount.toLocaleString(locale)} {translate(language, "samples")}{session.interrupted ? ` · ${translate(language, "interrupted")}` : ""}</span></button>)}{!filteredArchive.length && <div className="archive-empty"><Archive size={24} /><span>{translate(language, "archiveEmpty")}</span></div>}</div>
+        <label className="show-hidden-control"><input type="checkbox" checked={showHidden} onChange={(event) => void handleShowHidden(event.target.checked)} /><span>{translate(language, "showHidden")}</span></label>
+        <div className="archive-list">{filteredArchive.map((session) => <button type="button" className={`archive-row ${session.hidden ? "hidden" : ""} ${selectedSession?.session.id === session.id ? "active" : ""}`} key={session.id} onClick={() => void selectArchiveSession(session.id)}><span className="archive-row-date">{formatDate(session.eventDate, language)}{session.hidden ? ` · ${translate(language, "hidden")}` : ""}</span><strong>{session.title}</strong><span>{eventLabels[session.eventType] ?? session.eventType} · {session.sampleCount.toLocaleString(locale)} {translate(language, "samples")}{session.interrupted ? ` · ${translate(language, "interrupted")}` : ""}</span></button>)}{!filteredArchive.length && <div className="archive-empty"><Archive size={24} /><span>{translate(language, "archiveEmpty")}</span></div>}</div>
       </aside>
       <section className="archive-detail">{selectedSession ? <>
         <div className="archive-detail-header"><div><span className="eyebrow">{eventLabels[selectedSession.session.eventType] ?? selectedSession.session.eventType}</span><h1>{selectedSession.session.title}</h1></div><div className="archive-header-actions"><div className="archive-date"><CalendarDays size={15} />{formatDate(selectedSession.session.eventDate, language)}</div><button className="export-button" type="button" onClick={() => void handleExport()}><Download size={15} /> {translate(language, "export")}</button></div></div>
@@ -396,16 +421,16 @@ function App() {
       </> : <div className="detail-empty"><FolderOpen size={32} /><h2>{translate(language, "viewSession")}</h2><span>{translate(language, "measurementsAppearHere")}</span></div>}</section>
       <aside className="archive-meta-panel">
         <div className="panel-heading compact"><HardDrive size={17} /><div><span className="eyebrow">{translate(language, "details")}</span><h2>{translate(language, "session")}</h2></div></div>
-        {selectedSession ? <><div className="metadata-list"><div><span><Clock3 size={13} /> {translate(language, "duration")}</span><strong>{duration(selectedSession.session.started, selectedSession.session.ended, language)}</strong></div>{selectedSession.session.interrupted && <div className="recovered-session"><span><RefreshCw size={13} /> {translate(language, "status")}</span><strong>{translate(language, "interruptedFull")}</strong></div>}<div><span><Users size={13} /> {translate(language, "audioEngineer")}</span><strong>{selectedSession.session.responsibleEngineerName || translate(language, "notSpecified")}</strong></div><div><span><Cable size={13} /> {translate(language, "devices")}</span><strong>{selectedSession.session.devices.length}</strong></div>{selectedSession.session.devices.map((device) => <div className="device-record" key={device.id}><span>{device.name}</span><strong>dB{device.weighting ?? "?"} · {device.response ?? translate(language, "unknown")}</strong></div>)}</div><div className="marker-list"><div className="marker-list-heading"><Flag size={13} /><span>{translate(language, "markers")}</span><strong>{selectedSession.session.markers.length}</strong></div>{selectedSession.session.markers.map((marker) => <div className="marker-row" key={marker.id}><time>{formatChartTime(marker.timestamp, language)}</time><strong>{marker.label}</strong>{marker.note && <span>{marker.note}</span>}</div>)}{!selectedSession.session.markers.length && <span className="no-markers">{translate(language, "noMarkers")}</span>}</div><button className="delete-session-button" type="button" onClick={() => setDeleteCandidate(selectedSession.session)}><Trash2 size={15} /> {translate(language, "delete")}</button></> : null}
+        {selectedSession ? <><div className="metadata-list"><div><span><Clock3 size={13} /> {translate(language, "duration")}</span><strong>{duration(selectedSession.session.started, selectedSession.session.ended, language)}</strong></div>{selectedSession.session.interrupted && <div className="recovered-session"><span><RefreshCw size={13} /> {translate(language, "status")}</span><strong>{translate(language, "interruptedFull")}</strong></div>}{selectedSession.session.hidden && <div className="hidden-session"><span><EyeOff size={13} /> {translate(language, "status")}</span><strong>{translate(language, "hidden")}</strong></div>}<div><span><Users size={13} /> {translate(language, "audioEngineer")}</span><strong>{selectedSession.session.responsibleEngineerName || translate(language, "notSpecified")}</strong></div><div><span><Cable size={13} /> {translate(language, "devices")}</span><strong>{selectedSession.session.devices.length}</strong></div>{selectedSession.session.devices.map((device) => <div className="device-record" key={device.id}><span>{device.name}</span><strong>dB{device.weighting ?? "?"} · {device.response ?? translate(language, "unknown")}</strong></div>)}</div><div className="marker-list"><div className="marker-list-heading"><Flag size={13} /><span>{translate(language, "markers")}</span><strong>{selectedSession.session.markers.length}</strong></div>{selectedSession.session.markers.map((marker) => <div className="marker-row" key={marker.id}><time>{formatChartTime(marker.timestamp, language)}</time><strong>{marker.label}</strong>{marker.note && <span>{marker.note}</span>}</div>)}{!selectedSession.session.markers.length && <span className="no-markers">{translate(language, "noMarkers")}</span>}</div>{selectedSession.session.hidden ? <button className="archive-session-action restore" type="button" onClick={() => void handleRestore()}><Undo2 size={15} /> {translate(language, "restore")}</button> : <button className="archive-session-action" type="button" onClick={() => setHideCandidate(selectedSession.session)}><EyeOff size={15} /> {translate(language, "hide")}</button>}</> : null}
         <div className="library-path"><span>{translate(language, "libraryLocation")}</span><code title={archivePath}>{archivePath || translate(language, "loading")}</code></div>
       </aside>
-    </main> : <StatisticsView language={language} sessions={archive} classifications={classifications} onRefresh={refreshArchive} onOpenSession={openArchiveSession} loadComparison={compareSessions} />}
-    {deleteCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleteBusy) setDeleteCandidate(null); }}>
-      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
-        <div className="confirm-dialog-header"><div className="danger-icon"><Trash2 size={18} /></div><button className="icon-button" type="button" onClick={() => setDeleteCandidate(null)} disabled={deleteBusy} aria-label={translate(language, "close")} title={translate(language, "close")}><X size={16} /></button></div>
-        <h2 id="delete-dialog-title">{translate(language, "deleteConfirm")}</h2>
-        <p><strong>{deleteCandidate.title}</strong> {translate(language, "sessionDeleteBody")}</p>
-        <div className="confirm-dialog-actions"><button className="cancel-button" type="button" onClick={() => setDeleteCandidate(null)} disabled={deleteBusy} autoFocus>{translate(language, "cancel")}</button><button className="confirm-delete-button" type="button" onClick={() => void handleDelete()} disabled={deleteBusy}><Trash2 size={15} />{deleteBusy ? translate(language, "deleteBusy") : translate(language, "delete")}</button></div>
+    </main> : <StatisticsView language={language} sessions={archive.filter((session) => !session.hidden)} classifications={classifications} onRefresh={async () => { setArchive(await listSessions(false)); }} onOpenSession={openArchiveSession} loadComparison={compareSessions} />}
+    {hideCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !hideBusy) setHideCandidate(null); }}>
+      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="hide-dialog-title">
+        <div className="confirm-dialog-header"><div className="hide-icon"><EyeOff size={18} /></div><button className="icon-button" type="button" onClick={() => setHideCandidate(null)} disabled={hideBusy} aria-label={translate(language, "close")} title={translate(language, "close")}><X size={16} /></button></div>
+        <h2 id="hide-dialog-title">{translate(language, "hideConfirm")}</h2>
+        <p><strong>{hideCandidate.title}</strong> {translate(language, "sessionHideBody")}</p>
+        <div className="confirm-dialog-actions"><button className="cancel-button" type="button" onClick={() => setHideCandidate(null)} disabled={hideBusy} autoFocus>{translate(language, "cancel")}</button><button className="confirm-hide-button" type="button" onClick={() => void handleHide()} disabled={hideBusy}><EyeOff size={15} />{hideBusy ? translate(language, "hideBusy") : translate(language, "hide")}</button></div>
       </section>
     </div>}
   </div>;

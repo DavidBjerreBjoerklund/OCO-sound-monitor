@@ -59,8 +59,8 @@ The LIVE workspace currently provides:
 - marker lines and annotations on live and historical graphs,
 - portable exports containing `session.json`, `measurements.csv`, and
   `markers.csv`,
-- permanent deletion of erroneous recordings from Archive with explicit
-  confirmation,
+- reversible hiding of erroneous recordings from Archive and Statistics, with a
+  dedicated hidden-session view for restoration,
 - Digital Sound 8922 startup-zero filtering before live display and storage,
 - interrupted-session recovery plus clean finalization when the app closes,
 - automatic serial reconnection with capped exponential backoff.
@@ -77,6 +77,7 @@ time and the ordered list of classifications shown in the application:
 language = da
 
 [service]
+soundcheck_start_time = 09:30
 start_time = 10:30
 
 [classifications.da]
@@ -92,6 +93,10 @@ Classification identifiers use ASCII letters, digits, and hyphens, while labels
 may use normal UTF-8 text. Set `language` to `da` or `en`, then restart Sound
 Monitor. The interface, locale-aware date and number formatting, automatic service
 title, marker presets, and classification labels follow the selected language.
+On Sundays, sessions started from `soundcheck_start_time` until the minute before
+`start_time` are suggested as soundchecks. Sessions started at `start_time` or
+later in the service window are suggested as services. Existing INI files without
+`soundcheck_start_time` use one hour before `start_time`.
 Existing sessions retain their stable stored classification ID if its INI entry is
 later removed. Legacy files with a single `[classifications]` section remain valid
 and default to Danish.

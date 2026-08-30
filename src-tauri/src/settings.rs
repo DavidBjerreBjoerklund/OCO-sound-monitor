@@ -17,6 +17,7 @@ pub struct Classification {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub language: String,
+    pub soundcheck_start_time: String,
     pub service_start_time: String,
     pub classifications: Vec<Classification>,
     pub file_path: String,
@@ -55,6 +56,11 @@ impl AppSettings {
         parse_time_minutes(&self.service_start_time)
             .expect("service start time was validated while loading settings")
     }
+
+    pub fn soundcheck_start_minutes(&self) -> u16 {
+        parse_time_minutes(&self.soundcheck_start_time)
+            .expect("soundcheck start time was validated while loading settings")
+    }
 }
 
 fn find_packaged_settings(resource_dir: &Path) -> Option<PathBuf> {
@@ -70,6 +76,7 @@ fn find_packaged_settings(resource_dir: &Path) -> Option<PathBuf> {
 fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
     let mut section = "";
     let mut language = "da".to_owned();
+    let mut soundcheck_start_time = None;
     let mut service_start_time = None;
     let mut classification_sets: HashMap<String, Vec<Classification>> = HashMap::new();
 
@@ -101,6 +108,9 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
 
         match section {
             "general" if key == "language" => language = value.to_ascii_lowercase(),
+            "service" if key == "soundcheck_start_time" => {
+                soundcheck_start_time = Some(value.to_owned())
+            }
             "service" if key == "start_time" => service_start_time = Some(value.to_owned()),
             "classifications" => classification_sets
                 .entry("default".to_owned())
@@ -140,6 +150,23 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
             path.display()
         )
     })?;
+    let service_start_minutes =
+        parse_time_minutes(&service_start_time).expect("service start time was validated above");
+    let soundcheck_start_time = soundcheck_start_time
+        .unwrap_or_else(|| format_minutes((service_start_minutes + 24 * 60 - 60) % (24 * 60)));
+    let soundcheck_start_minutes =
+        parse_time_minutes(&soundcheck_start_time).map_err(|message| {
+            format!(
+                "Ugyldigt [service] soundcheck_start_time i {}: {message}",
+                path.display()
+            )
+        })?;
+    if soundcheck_start_minutes >= service_start_minutes {
+        return Err(format!(
+            "[service] soundcheck_start_time skal ligge før start_time i {}.",
+            path.display()
+        ));
+    }
     let mut classifications = classification_sets
         .remove(&language)
         .or_else(|| classification_sets.remove("default"))
@@ -173,10 +200,15 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
 
     Ok(AppSettings {
         language,
+        soundcheck_start_time,
         service_start_time,
         classifications,
         file_path: path.display().to_string(),
     })
+}
+
+fn format_minutes(minutes: u16) -> String {
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 fn parse_time_minutes(value: &str) -> Result<u16, String> {
@@ -205,12 +237,13 @@ mod tests {
     #[test]
     fn parses_service_time_and_ordered_classifications() {
         let settings = parse_settings(
-            "[general]\nlanguage = en\n[service]\nstart_time = 09:45\n\n[classifications.da]\nservice = Gudstjeneste\n[classifications.en]\nservice = Service\nsoundcheck = Soundcheck\n",
+            "[general]\nlanguage = en\n[service]\nsoundcheck_start_time = 08:45\nstart_time = 09:45\n\n[classifications.da]\nservice = Gudstjeneste\n[classifications.en]\nservice = Service\nsoundcheck = Soundcheck\n",
             Path::new("test.ini"),
         )
         .unwrap();
 
         assert_eq!(settings.service_start_minutes(), 9 * 60 + 45);
+        assert_eq!(settings.soundcheck_start_minutes(), 8 * 60 + 45);
         assert_eq!(settings.language, "en");
         assert_eq!(settings.classifications[0].id, "service");
         assert_eq!(settings.classifications[0].label, "Service");
@@ -226,7 +259,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(settings.language, "da");
+        assert_eq!(settings.soundcheck_start_time, "09:30");
         assert_eq!(settings.classifications[0].label, "Gudstjeneste");
+    }
+
+    #[test]
+    fn rejects_soundcheck_start_at_or_after_service_start() {
+        let error = parse_settings(
+            "[service]\nsoundcheck_start_time = 10:30\nstart_time = 10:30\n[classifications]\nservice = Gudstjeneste\n",
+            Path::new("test.ini"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("skal ligge før"));
     }
 
     #[test]

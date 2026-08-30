@@ -15,6 +15,7 @@ export interface Classification {
 
 export interface AppSettings {
   language: "da" | "en";
+  soundcheckStartTime: string;
   serviceStartTime: string;
   classifications: Classification[];
   filePath: string;
@@ -90,6 +91,7 @@ export interface Session {
   started: string;
   ended: string | null;
   interrupted: boolean;
+  hidden: boolean;
   responsibleEngineerId: string | null;
   responsibleEngineerName: string | null;
   audioCrew: Array<{ personId: string; role: string }>;
@@ -122,6 +124,7 @@ export interface SessionSummary {
   started: string;
   ended: string | null;
   interrupted: boolean;
+  hidden: boolean;
   responsibleEngineerName: string | null;
   deviceCount: number;
   sampleCount: number;

@@ -170,6 +170,25 @@ button {
   font-size: 12px;
 }
 
+.show-hidden-control {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0 14px 8px;
+  color: #929b95;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.show-hidden-control input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #8ca43b;
+}
+
 .archive-list {
   flex: 1;
   min-height: 0;
@@ -198,6 +217,14 @@ button {
 .archive-row.active {
   box-shadow: inset 3px 0 #b7d52a;
   background: #252a27;
+}
+
+.archive-row.hidden {
+  opacity: 0.67;
+}
+
+.archive-row.hidden .archive-row-date {
+  color: #c7a85d;
 }
 
 .archive-row-date {
@@ -290,7 +317,7 @@ button {
   background: #303632;
 }
 
-.delete-session-button {
+.archive-session-action {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -298,19 +325,24 @@ button {
   width: 100%;
   height: 34px;
   margin-top: 14px;
-  border: 1px solid #633a36;
+  border: 1px solid #4b5550;
   border-radius: 4px;
   background: transparent;
-  color: #ef8b7e;
+  color: #c7cec9;
   font-size: 11px;
   font-weight: 700;
   cursor: pointer;
 }
 
-.delete-session-button:hover {
-  border-color: #8b4941;
-  background: #2d201e;
-  color: #ff9b8e;
+.archive-session-action:hover {
+  border-color: #68756e;
+  background: #292e2b;
+  color: #f0f2ee;
+}
+
+.archive-session-action.restore {
+  border-color: #647532;
+  color: #c7dd72;
 }
 
 .modal-backdrop {
@@ -338,15 +370,15 @@ button {
   justify-content: space-between;
 }
 
-.danger-icon {
+.hide-icon {
   display: grid;
   width: 34px;
   height: 34px;
   place-items: center;
-  border: 1px solid #70413b;
+  border: 1px solid #4c5751;
   border-radius: 4px;
-  background: #332320;
-  color: #ff8575;
+  background: #292e2b;
+  color: #cbd2cd;
 }
 
 .confirm-dialog h2 {
@@ -374,7 +406,7 @@ button {
 }
 
 .cancel-button,
-.confirm-delete-button {
+.confirm-hide-button {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -393,14 +425,14 @@ button {
   color: #dfe3dd;
 }
 
-.confirm-delete-button {
-  border: 1px solid #e36c5d;
-  background: #e36c5d;
-  color: #21110f;
+.confirm-hide-button {
+  border: 1px solid #8ca43b;
+  background: #8ca43b;
+  color: #15190d;
 }
 
 .cancel-button:disabled,
-.confirm-delete-button:disabled {
+.confirm-hide-button:disabled {
   cursor: wait;
   opacity: 0.6;
 }
@@ -1206,6 +1238,10 @@ h2 {
 
 .metadata-list .recovered-session strong {
   color: #e6b84b;
+}
+
+.metadata-list .hidden-session strong {
+  color: #c7a85d;
 }
 
 .statistics-workspace {

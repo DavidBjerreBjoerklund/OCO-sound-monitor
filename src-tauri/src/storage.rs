@@ -34,6 +34,7 @@ pub struct SessionSummary {
     pub started: DateTime<FixedOffset>,
     pub ended: Option<DateTime<FixedOffset>>,
     pub interrupted: bool,
+    pub hidden: bool,
     pub responsible_engineer_name: Option<String>,
     pub device_count: usize,
     pub sample_count: usize,
@@ -239,6 +240,7 @@ impl SessionStore {
             started,
             ended: None,
             interrupted: false,
+            hidden: false,
             responsible_engineer_id: None,
             responsible_engineer_name: request
                 .responsible_engineer_name
@@ -355,10 +357,13 @@ impl SessionStore {
         Ok(marker)
     }
 
-    pub fn list(&self) -> Result<Vec<SessionSummary>, String> {
+    pub fn list(&self, include_hidden: bool) -> Result<Vec<SessionSummary>, String> {
         let mut summaries = Vec::new();
         for directory in session_directories(&self.root)? {
             let session = read_session_metadata(&directory)?;
+            if session.hidden && !include_hidden {
+                continue;
+            }
             let measurements = read_measurements(&directory)?;
             summaries.push(summarize(&session, &measurements));
         }
@@ -383,12 +388,16 @@ impl SessionStore {
         }
         let mut measurements = Vec::with_capacity(ids.len());
         for id in ids {
-            measurements.push(self.load(id)?.measurements);
+            let detail = self.load(id)?;
+            if detail.session.hidden {
+                return Err("Skjulte sessioner kan ikke sammenlignes.".to_owned());
+            }
+            measurements.push(detail.measurements);
         }
         Ok(aggregate_sessions(&measurements))
     }
 
-    pub fn delete(&self, id: &str) -> Result<(), String> {
+    pub fn set_hidden(&self, id: &str, hidden: bool) -> Result<Session, String> {
         let active_id = self
             .active
             .lock()
@@ -396,15 +405,17 @@ impl SessionStore {
             .as_ref()
             .map(|active| active.session.id.clone());
         if active_id.as_deref() == Some(id) {
-            return Err("En aktiv session kan ikke slettes.".to_owned());
+            return Err("En aktiv session kan ikke skjules.".to_owned());
         }
 
         let directory = session_directories(&self.root)?
             .into_iter()
             .find(|directory| directory.file_name().and_then(|name| name.to_str()) == Some(id))
             .ok_or_else(|| format!("Sessionen blev ikke fundet: {id}"))?;
-        fs::remove_dir_all(directory)
-            .map_err(|error| format!("Kunne ikke slette sessionen: {error}"))
+        let mut session = read_session_metadata(&directory)?;
+        session.hidden = hidden;
+        write_session_metadata(&directory, &session)?;
+        Ok(session)
     }
 
     pub fn export(&self, id: &str) -> Result<ExportResult, String> {
@@ -685,6 +696,7 @@ fn summarize(session: &Session, measurements: &[StoredMeasurement]) -> SessionSu
         started: session.started,
         ended: session.ended,
         interrupted: session.interrupted,
+        hidden: session.hidden,
         responsible_engineer_name: session.responsible_engineer_name.clone(),
         device_count: session.devices.len(),
         sample_count: measurements
@@ -811,8 +823,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            store.delete(&session.id).unwrap_err(),
-            "En aktiv session kan ikke slettes."
+            store.set_hidden(&session.id, true).unwrap_err(),
+            "En aktiv session kan ikke skjules."
         );
         store
             .record(&Measurement {
@@ -833,7 +845,7 @@ mod tests {
         assert_eq!(marker.session_id, session.id);
         store.stop().unwrap();
 
-        let summaries = store.list().unwrap();
+        let summaries = store.list(false).unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].sample_count, 1);
         assert_eq!(summaries[0].average_db, Some(71.4));
@@ -858,8 +870,13 @@ mod tests {
         assert!(export_directory.join("measurements.csv").is_file());
         assert!(export_directory.join("markers.csv").is_file());
 
-        store.delete(&session.id).unwrap();
-        assert!(store.list().unwrap().is_empty());
+        let hidden = store.set_hidden(&session.id, true).unwrap();
+        assert!(hidden.hidden);
+        assert!(store.list(false).unwrap().is_empty());
+        assert!(store.list(true).unwrap()[0].hidden);
+        let restored = store.set_hidden(&session.id, false).unwrap();
+        assert!(!restored.hidden);
+        assert_eq!(store.list(false).unwrap().len(), 1);
 
         fs::remove_dir_all(container).unwrap();
     }
@@ -896,7 +913,7 @@ mod tests {
         assert_eq!(bucket.maximum_db, 90.0);
         assert_eq!(bucket.sample_count, 2);
 
-        let summary = store.list().unwrap().remove(0);
+        let summary = store.list(false).unwrap().remove(0);
         assert_eq!(summary.sample_count, 2);
         assert_eq!(summary.minimum_db, Some(80.0));
         assert_eq!(summary.maximum_db, Some(90.0));

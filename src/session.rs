@@ -42,6 +42,8 @@ pub struct Session {
     pub ended: Option<DateTime<FixedOffset>>,
     #[serde(default)]
     pub interrupted: bool,
+    #[serde(default)]
+    pub hidden: bool,
     pub responsible_engineer_id: Option<String>,
     #[serde(default)]
     pub responsible_engineer_name: Option<String>,

@@ -38,6 +38,7 @@ export async function getSettings(): Promise<AppSettings> {
   const language = previewLanguage();
   return {
     language,
+    soundcheckStartTime: "09:30",
     serviceStartTime: "10:30",
     filePath: "Preview-hukommelse/Sessions/sound-monitor.ini",
     classifications: language === "da" ? [
@@ -88,6 +89,7 @@ function seedStatisticsPreview(): void {
       started: startedAt.toISOString(),
       ended: new Date(startedAt.getTime() + 1_790_000).toISOString(),
       interrupted: false,
+      hidden: false,
       responsibleEngineerId: null,
       responsibleEngineerName,
       audioCrew: [],
@@ -198,6 +200,7 @@ export async function startSession(request: StartSessionRequest): Promise<Sessio
     formatVersion: 2, id: `preview-${Date.now()}`, title: request.title,
     eventType: request.eventType, eventDate: request.eventDate, started, ended: null,
     interrupted: false,
+    hidden: false,
     responsibleEngineerId: null, responsibleEngineerName: request.responsibleEngineerName,
     audioCrew: [], devices: request.devices, markers: [], notes: null,
   };
@@ -215,9 +218,9 @@ export async function stopSession(): Promise<Session> {
   return session;
 }
 
-export async function listSessions(): Promise<SessionSummary[]> {
-  if (isDesktopRuntime()) return invoke<SessionSummary[]>("list_sessions");
-  return [...mockArchive.values()].map(({ session, measurements }) => {
+export async function listSessions(includeHidden = false): Promise<SessionSummary[]> {
+  if (isDesktopRuntime()) return invoke<SessionSummary[]>("list_sessions", { includeHidden });
+  return [...mockArchive.values()].filter(({ session }) => includeHidden || !session.hidden).map(({ session, measurements }) => {
     const levels = measurements.map((measurement) => measurement.levelDb);
     const sorted = [...levels].sort((left, right) => left - right);
     const quantile = (position: number) => sorted.length
@@ -235,6 +238,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
       id: session.id, title: session.title, eventType: session.eventType,
       eventDate: session.eventDate, started: session.started, ended: session.ended,
       interrupted: session.interrupted,
+      hidden: session.hidden,
       responsibleEngineerName: session.responsibleEngineerName,
       deviceCount: session.devices.length, sampleCount: measurements.length,
       minimumDb: levels.length ? Math.min(...levels) : null,
@@ -308,7 +312,10 @@ export async function exportSession(id: string): Promise<ExportResult> {
   };
 }
 
-export async function deleteSession(id: string): Promise<void> {
-  if (isDesktopRuntime()) return invoke<void>("delete_session", { id });
-  if (!mockArchive.delete(id)) throw new Error("Sessionen blev ikke fundet.");
+export async function setSessionHidden(id: string, hidden: boolean): Promise<Session> {
+  if (isDesktopRuntime()) return invoke<Session>("set_session_hidden", { id, hidden });
+  const detail = mockArchive.get(id);
+  if (!detail) throw new Error("Sessionen blev ikke fundet.");
+  detail.session.hidden = hidden;
+  return detail.session;
 }
