@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use sound_monitor::measurement::Measurement;
 use sound_monitor::session::{Marker, Session, SessionDevice, SESSION_FORMAT_VERSION};
 
+use crate::statistics::{aggregate_sessions, calculate_statistics, ComparisonSeries};
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartSessionRequest {
@@ -35,6 +37,14 @@ pub struct SessionSummary {
     pub minimum_db: Option<f32>,
     pub maximum_db: Option<f32>,
     pub average_db: Option<f32>,
+    pub leq_db: Option<f32>,
+    pub typical_low_db: Option<f32>,
+    pub typical_high_db: Option<f32>,
+    pub observed_seconds: f64,
+    pub red_zone_seconds: f64,
+    pub red_zone_percent: f64,
+    pub weightings: Vec<String>,
+    pub responses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -268,6 +278,17 @@ impl SessionStore {
         })
     }
 
+    pub fn compare(&self, ids: &[String]) -> Result<ComparisonSeries, String> {
+        if ids.len() < 2 {
+            return Err("Vælg mindst to sessioner til sammenligning.".to_owned());
+        }
+        let mut measurements = Vec::with_capacity(ids.len());
+        for id in ids {
+            measurements.push(self.load(id)?.measurements);
+        }
+        Ok(aggregate_sessions(&measurements))
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), String> {
         let active_id = self
             .active
@@ -494,21 +515,41 @@ fn read_measurements(directory: &Path) -> Result<Vec<Measurement>, String> {
 }
 
 fn summarize(session: &Session, measurements: &[Measurement]) -> SessionSummary {
-    let (minimum_db, maximum_db, average_db) = if measurements.is_empty() {
-        (None, None, None)
+    let average_db = if measurements.is_empty() {
+        None
     } else {
-        let minimum = measurements
-            .iter()
-            .map(|m| m.level_db)
-            .fold(f32::INFINITY, f32::min);
-        let maximum = measurements
-            .iter()
-            .map(|m| m.level_db)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let average =
-            measurements.iter().map(|m| m.level_db).sum::<f32>() / measurements.len() as f32;
-        (Some(minimum), Some(maximum), Some(average))
+        Some(measurements.iter().map(|m| m.level_db).sum::<f32>() / measurements.len() as f32)
     };
+    let statistics = calculate_statistics(measurements);
+    let mut weightings: Vec<_> = session
+        .devices
+        .iter()
+        .filter_map(|device| device.weighting.map(|value| value.to_string()))
+        .collect();
+    if weightings.is_empty() {
+        weightings.extend(
+            measurements
+                .iter()
+                .filter_map(|measurement| measurement.weighting.map(|value| value.to_string())),
+        );
+    }
+    weightings.sort();
+    weightings.dedup();
+    let mut responses: Vec<_> = session
+        .devices
+        .iter()
+        .filter_map(|device| device.response.map(|value| value.to_string()))
+        .collect();
+    if responses.is_empty() {
+        responses.extend(
+            measurements
+                .iter()
+                .filter_map(|measurement| measurement.response.map(|value| value.to_string())),
+        );
+    }
+    responses.sort();
+    responses.dedup();
+
     SessionSummary {
         id: session.id.clone(),
         title: session.title.clone(),
@@ -520,9 +561,17 @@ fn summarize(session: &Session, measurements: &[Measurement]) -> SessionSummary 
         responsible_engineer_name: session.responsible_engineer_name.clone(),
         device_count: session.devices.len(),
         sample_count: measurements.len(),
-        minimum_db,
-        maximum_db,
+        minimum_db: statistics.minimum_db,
+        maximum_db: statistics.maximum_db,
         average_db,
+        leq_db: statistics.leq_db,
+        typical_low_db: statistics.typical_low_db,
+        typical_high_db: statistics.typical_high_db,
+        observed_seconds: statistics.observed_seconds,
+        red_zone_seconds: statistics.red_zone_seconds,
+        red_zone_percent: statistics.red_zone_percent(),
+        weightings,
+        responses,
     }
 }
 
@@ -633,6 +682,11 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].sample_count, 1);
         assert_eq!(summaries[0].average_db, Some(71.4));
+        assert_eq!(summaries[0].leq_db, Some(71.4));
+        assert_eq!(summaries[0].typical_low_db, Some(71.4));
+        assert_eq!(summaries[0].typical_high_db, Some(71.4));
+        assert_eq!(summaries[0].weightings, ["C"]);
+        assert_eq!(summaries[0].responses, ["Slow"]);
         let detail = store.load(&session.id).unwrap();
         assert_eq!(
             detail.session.responsible_engineer_name.as_deref(),

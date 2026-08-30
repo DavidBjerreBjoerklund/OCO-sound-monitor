@@ -113,6 +113,14 @@ export interface SessionSummary {
   minimumDb: number | null;
   maximumDb: number | null;
   averageDb: number | null;
+  leqDb: number | null;
+  typicalLowDb: number | null;
+  typicalHighDb: number | null;
+  observedSeconds: number;
+  redZoneSeconds: number;
+  redZonePercent: number;
+  weightings: FrequencyWeighting[];
+  responses: TimeWeighting[];
 }
 
 export interface SessionDetail {
@@ -123,4 +131,16 @@ export interface SessionDetail {
 export interface ExportResult {
   directory: string;
   files: string[];
+}
+
+export interface AggregatePoint {
+  positionPercent: number;
+  lowerDb: number;
+  medianDb: number;
+  upperDb: number;
+}
+
+export interface ComparisonSeries {
+  sessionCount: number;
+  points: AggregatePoint[];
 }

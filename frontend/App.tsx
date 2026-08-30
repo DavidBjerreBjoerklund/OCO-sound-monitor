@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useState } from "react";
 import {
   Activity, Archive, Cable, CalendarDays, Check, Circle, Clock3, Download,
-  Flag, FolderOpen, Gauge, HardDrive, Plus, Plug, RefreshCw, Search, Square,
+  ChartNoAxesCombined, Flag, FolderOpen, Gauge, HardDrive, Plus, Plug, RefreshCw, Search, Square,
   Trash2, Users, Wifi, WifiOff, X,
 } from "lucide-react";
 import {
@@ -9,7 +9,7 @@ import {
   Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  addMarker, connectDevice, deleteSession, disconnectDevice, exportSession,
+  addMarker, compareSessions, connectDevice, deleteSession, disconnectDevice, exportSession,
   isDesktopRuntime, libraryLocation, listDevices, listSessions, loadSession, startSession,
   stopSession, suggestSession,
 } from "./bridge";
@@ -17,6 +17,7 @@ import type {
   ConnectionStatus, DeviceDescriptor, DeviceEvent, FrequencyWeighting,
   Marker, Measurement, Session, SessionDetail, SessionSummary, TimeWeighting,
 } from "./types";
+import StatisticsView from "./StatisticsView";
 
 const MAX_CHART_POINTS = 540;
 const RED_ZONE_DB = 90;
@@ -48,7 +49,8 @@ function duration(started: string, ended: string | null): string {
 function calculateStats(measurements: Measurement[]) {
   if (!measurements.length) return null;
   const levels = measurements.map((measurement) => measurement.levelDb);
-  return { min: Math.min(...levels), max: Math.max(...levels), average: levels.reduce((sum, value) => sum + value, 0) / levels.length };
+  const leq = 10 * Math.log10(levels.reduce((sum, value) => sum + 10 ** (value / 10), 0) / levels.length);
+  return { min: Math.min(...levels), max: Math.max(...levels), leq };
 }
 
 function calculateRedZoneSeconds(measurements: Measurement[]): number {
@@ -137,7 +139,7 @@ function Stats({ measurements }: { measurements: Measurement[] }) {
   const redZone = formatElapsed(calculateRedZoneSeconds(measurements));
   return <div className="stats-strip">
     <div><span>Minimum</span><strong>{stats ? stats.min.toFixed(1) : "--.-"}</strong><small>dB</small></div>
-    <div><span>Gennemsnit</span><strong>{stats ? stats.average.toFixed(1) : "--.-"}</strong><small>dB</small></div>
+    <div><span>Leq</span><strong>{stats ? stats.leq.toFixed(1) : "--.-"}</strong><small>dB</small></div>
     <div><span>Maksimum</span><strong>{stats ? stats.max.toFixed(1) : "--.-"}</strong><small>dB</small></div>
     <div><span>Samples</span><strong>{measurements.length}</strong><small>stk.</small></div>
     <div className="red-zone-stat"><span>Tid i rød zone</span><strong>{redZone}</strong><small>≥ {RED_ZONE_DB} dB</small></div>
@@ -145,7 +147,7 @@ function Stats({ measurements }: { measurements: Measurement[] }) {
 }
 
 function App() {
-  const [mode, setMode] = useState<"live" | "archive">("live");
+  const [mode, setMode] = useState<"live" | "archive" | "statistics">("live");
   const [devices, setDevices] = useState<DeviceDescriptor[]>([]);
   const [selectedPort, setSelectedPort] = useState("");
   const [activeDeviceId, setActiveDeviceId] = useState<string | null>(null);
@@ -248,9 +250,18 @@ function App() {
     setMode("archive"); await refreshArchive(!selectedSession);
   };
 
+  const openStatistics = async () => {
+    setMode("statistics"); await refreshArchive();
+  };
+
   const selectArchiveSession = async (id: string) => {
     try { setSelectedSession(await loadSession(id)); }
     catch (reason) { setError(String(reason)); }
+  };
+
+  const openArchiveSession = async (id: string) => {
+    setMode("archive");
+    await selectArchiveSession(id);
   };
 
   const handleAddMarker = async () => {
@@ -310,6 +321,7 @@ function App() {
       <nav className="mode-tabs" aria-label="Primær navigation">
         <button className={`mode-tab ${mode === "live" ? "active" : ""}`} type="button" onClick={() => setMode("live")}><Activity size={15} /> Live</button>
         <button className={`mode-tab ${mode === "archive" ? "active" : ""}`} type="button" onClick={() => void openArchive()}><Archive size={15} /> Arkiv</button>
+        <button className={`mode-tab ${mode === "statistics" ? "active" : ""}`} type="button" onClick={() => void openStatistics()}><ChartNoAxesCombined size={15} /> Statistik</button>
       </nav>
       <div className="topbar-status">{!isDesktopRuntime() && <span className="preview-label">Preview</span>}<span className={`status-dot ${connectionStatus}`} aria-hidden="true" /><span>{statusLabel}</span><time>{formatClock(clock)}</time></div>
     </header>
@@ -342,7 +354,7 @@ function App() {
         <div className={`connection-state ${reconnecting ? "reconnecting" : ""}`}>{reconnecting ? <RefreshCw className="spin" size={17} /> : connected ? <Wifi size={17} /> : <WifiOff size={17} />}<div><span>Status</span><strong>{statusLabel}</strong></div></div>
         <button className={`connect-button ${connectionActive ? "disconnect" : ""}`} type="button" onClick={() => void (connectionActive ? handleDisconnect() : handleConnect())} disabled={!selectedPort || connectionStatus === "connecting"}>{connectionActive ? <WifiOff size={16} /> : <Plug size={16} />}{connectionActive ? "Afbryd" : connectionStatus === "connecting" ? "Forbinder" : "Forbind"}</button>
       </aside>
-    </main> : <main className="archive-workspace">
+    </main> : mode === "archive" ? <main className="archive-workspace">
       <aside className="archive-list-panel">
         <div className="archive-list-heading"><div><span className="eyebrow">Bibliotek</span><h2>Sessioner</h2></div><button className="icon-button" type="button" onClick={() => void refreshArchive()} aria-label="Genindlæs arkiv" title="Genindlæs arkiv"><RefreshCw size={16} /></button></div>
         <label className="search-field"><Search size={15} /><input value={archiveSearch} onChange={(event) => setArchiveSearch(event.target.value)} placeholder="Søg i arkivet" aria-label="Søg i arkivet" /></label>
@@ -358,7 +370,7 @@ function App() {
         {selectedSession ? <><div className="metadata-list"><div><span><Clock3 size={13} /> Varighed</span><strong>{duration(selectedSession.session.started, selectedSession.session.ended)}</strong></div>{selectedSession.session.interrupted && <div className="recovered-session"><span><RefreshCw size={13} /> Status</span><strong>Gendannet efter afbrydelse</strong></div>}<div><span><Users size={13} /> Lydansvarlig</span><strong>{selectedSession.session.responsibleEngineerName || "Ikke angivet"}</strong></div><div><span><Cable size={13} /> Enheder</span><strong>{selectedSession.session.devices.length}</strong></div>{selectedSession.session.devices.map((device) => <div className="device-record" key={device.id}><span>{device.name}</span><strong>dB{device.weighting ?? "?"} · {device.response ?? "Ukendt"}</strong></div>)}</div><div className="marker-list"><div className="marker-list-heading"><Flag size={13} /><span>Markører</span><strong>{selectedSession.session.markers.length}</strong></div>{selectedSession.session.markers.map((marker) => <div className="marker-row" key={marker.id}><time>{formatChartTime(marker.timestamp)}</time><strong>{marker.label}</strong>{marker.note && <span>{marker.note}</span>}</div>)}{!selectedSession.session.markers.length && <span className="no-markers">Ingen markører</span>}</div><button className="delete-session-button" type="button" onClick={() => setDeleteCandidate(selectedSession.session)}><Trash2 size={15} /> Slet session</button></> : null}
         <div className="library-path"><span>Lagerplacering</span><code title={archivePath}>{archivePath || "Indlæser..."}</code></div>
       </aside>
-    </main>}
+    </main> : <StatisticsView sessions={archive} onRefresh={refreshArchive} onOpenSession={openArchiveSession} loadComparison={compareSessions} />}
     {deleteCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleteBusy) setDeleteCandidate(null); }}>
       <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
         <div className="confirm-dialog-header"><div className="danger-icon"><Trash2 size={18} /></div><button className="icon-button" type="button" onClick={() => setDeleteCandidate(null)} disabled={deleteBusy} aria-label="Luk dialog" title="Luk"><X size={16} /></button></div>

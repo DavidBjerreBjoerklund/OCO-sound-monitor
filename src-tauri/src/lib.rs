@@ -1,4 +1,5 @@
 mod manager;
+mod statistics;
 mod storage;
 
 use chrono::{DateTime, FixedOffset, Local};
@@ -12,6 +13,7 @@ use sound_monitor::template::{
 use tauri::{Manager, State};
 
 use manager::{ConnectOptions, DeviceEvent, DeviceManager};
+use statistics::ComparisonSeries;
 use storage::{
     AddMarkerRequest, ExportResult, SessionDetail, SessionStore, SessionSummary,
     StartSessionRequest,
@@ -81,6 +83,14 @@ fn load_session(state: State<'_, SessionStore>, id: String) -> Result<SessionDet
 }
 
 #[tauri::command]
+fn compare_sessions(
+    state: State<'_, SessionStore>,
+    ids: Vec<String>,
+) -> Result<ComparisonSeries, String> {
+    state.compare(&ids)
+}
+
+#[tauri::command]
 fn library_location(state: State<'_, SessionStore>) -> String {
     state.root().display().to_string()
 }
@@ -144,6 +154,7 @@ pub fn run() {
             stop_session,
             list_sessions,
             load_session,
+            compare_sessions,
             library_location,
             add_marker,
             export_session,
