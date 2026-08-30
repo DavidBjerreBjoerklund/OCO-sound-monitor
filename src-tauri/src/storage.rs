@@ -2,14 +2,17 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use sound_monitor::measurement::Measurement;
+use sound_monitor::measurement::{FrequencyWeighting, Measurement, TimeWeighting};
 use sound_monitor::session::{Marker, Session, SessionDevice, SESSION_FORMAT_VERSION};
 
 use crate::statistics::{aggregate_sessions, calculate_statistics, ComparisonSeries};
+
+const STORAGE_FLUSH_BUCKETS: usize = 5;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,7 +54,21 @@ pub struct SessionSummary {
 #[serde(rename_all = "camelCase")]
 pub struct SessionDetail {
     pub session: Session,
-    pub measurements: Vec<Measurement>,
+    pub measurements: Vec<StoredMeasurement>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredMeasurement {
+    pub timestamp: DateTime<Utc>,
+    pub device_id: String,
+    pub level_db: f32,
+    pub minimum_db: f32,
+    pub maximum_db: f32,
+    pub sample_count: usize,
+    pub weighting: Option<FrequencyWeighting>,
+    pub response: Option<TimeWeighting>,
+    pub raw: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,7 +88,106 @@ pub struct ExportResult {
 struct ActiveSession {
     directory: PathBuf,
     session: Session,
-    writers: HashMap<String, BufWriter<File>>,
+    writers: HashMap<String, MeasurementWriter>,
+}
+
+struct MeasurementWriter {
+    writer: BufWriter<File>,
+    pending: Option<MeasurementBucket>,
+    buckets_since_flush: usize,
+}
+
+struct MeasurementBucket {
+    second: i64,
+    timestamp: DateTime<Utc>,
+    device_id: String,
+    energy_sum: f64,
+    minimum_db: f32,
+    maximum_db: f32,
+    sample_count: usize,
+    weighting: Option<FrequencyWeighting>,
+    response: Option<TimeWeighting>,
+    raw: String,
+}
+
+impl MeasurementBucket {
+    fn new(measurement: &Measurement) -> Self {
+        Self {
+            second: measurement.timestamp.timestamp(),
+            timestamp: measurement.timestamp,
+            device_id: measurement.device_id.clone(),
+            energy_sum: sound_energy(measurement.level_db),
+            minimum_db: measurement.level_db,
+            maximum_db: measurement.level_db,
+            sample_count: 1,
+            weighting: measurement.weighting,
+            response: measurement.response,
+            raw: measurement.raw.clone(),
+        }
+    }
+
+    fn add(&mut self, measurement: &Measurement) {
+        self.energy_sum += sound_energy(measurement.level_db);
+        self.minimum_db = self.minimum_db.min(measurement.level_db);
+        self.maximum_db = self.maximum_db.max(measurement.level_db);
+        self.sample_count += 1;
+        self.weighting = measurement.weighting;
+        self.response = measurement.response;
+        self.raw.clone_from(&measurement.raw);
+    }
+
+    fn finish(self) -> StoredMeasurement {
+        StoredMeasurement {
+            timestamp: self.timestamp,
+            device_id: self.device_id,
+            level_db: (10.0 * (self.energy_sum / self.sample_count as f64).log10()) as f32,
+            minimum_db: self.minimum_db,
+            maximum_db: self.maximum_db,
+            sample_count: self.sample_count,
+            weighting: self.weighting,
+            response: self.response,
+            raw: self.raw,
+        }
+    }
+}
+
+impl MeasurementWriter {
+    fn record(&mut self, measurement: &Measurement) -> Result<(), String> {
+        if let Some(bucket) = self.pending.as_mut() {
+            if bucket.second == measurement.timestamp.timestamp() {
+                bucket.add(measurement);
+                return Ok(());
+            }
+        }
+
+        self.finish_pending()?;
+        self.pending = Some(MeasurementBucket::new(measurement));
+        Ok(())
+    }
+
+    fn finish_pending(&mut self) -> Result<(), String> {
+        let Some(bucket) = self.pending.take() else {
+            return Ok(());
+        };
+        write_stored_measurement(&mut self.writer, &bucket.finish())?;
+        self.buckets_since_flush += 1;
+        if self.buckets_since_flush >= STORAGE_FLUSH_BUCKETS {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        self.writer
+            .flush()
+            .map_err(|error| format!("Kunne ikke synkronisere målefilen: {error}"))?;
+        self.buckets_since_flush = 0;
+        Ok(())
+    }
+}
+
+fn sound_energy(level_db: f32) -> f64 {
+    10_f64.powf(level_db as f64 / 10.0)
 }
 
 #[derive(Clone)]
@@ -163,9 +279,8 @@ impl SessionStore {
             return Ok(None);
         };
         for writer in active.writers.values_mut() {
-            writer
-                .flush()
-                .map_err(|error| format!("Kunne ikke afslutte målefilen: {error}"))?;
+            writer.finish_pending()?;
+            writer.flush()?;
         }
         active.session.ended = Some(ended);
         active.session.interrupted = interrupted;
@@ -196,39 +311,23 @@ impl SessionStore {
             let mut writer = BufWriter::new(file);
             if is_empty {
                 writer
-                    .write_all(b"timestamp,deviceId,levelDb,weighting,response,raw\n")
+                    .write_all(b"timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n")
                     .map_err(|error| format!("Kunne ikke skrive målefilens header: {error}"))?;
             }
-            active.writers.insert(measurement.device_id.clone(), writer);
+            active.writers.insert(
+                measurement.device_id.clone(),
+                MeasurementWriter {
+                    writer,
+                    pending: None,
+                    buckets_since_flush: 0,
+                },
+            );
         }
         let writer = active
             .writers
             .get_mut(&measurement.device_id)
             .expect("writer was inserted");
-        writeln!(
-            writer,
-            "{},{},{},{},{},{}",
-            csv_field(&measurement.timestamp.to_rfc3339()),
-            csv_field(&measurement.device_id),
-            measurement.level_db,
-            csv_field(
-                &measurement
-                    .weighting
-                    .map(|value| value.to_string())
-                    .unwrap_or_default()
-            ),
-            csv_field(
-                &measurement
-                    .response
-                    .map(|value| value.to_string())
-                    .unwrap_or_default()
-            ),
-            csv_field(&measurement.raw),
-        )
-        .map_err(|error| format!("Kunne ikke gemme målingen: {error}"))?;
-        writer
-            .flush()
-            .map_err(|error| format!("Kunne ikke synkronisere målingen: {error}"))
+        writer.record(measurement)
     }
 
     pub fn add_marker(&self, request: AddMarkerRequest) -> Result<Marker, String> {
@@ -340,39 +439,52 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     fs::write(path, payload).map_err(|error| format!("Kunne ikke skrive eksporten: {error}"))
 }
 
-fn write_measurement_export(path: &Path, measurements: &[Measurement]) -> Result<(), String> {
+fn write_measurement_export(path: &Path, measurements: &[StoredMeasurement]) -> Result<(), String> {
     let mut writer = BufWriter::new(
         File::create(path).map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?,
     );
     writer
-        .write_all(b"timestamp,deviceId,levelDb,weighting,response,raw\n")
-        .map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?;
-    for measurement in measurements {
-        writeln!(
-            writer,
-            "{},{},{},{},{},{}",
-            csv_field(&measurement.timestamp.to_rfc3339()),
-            csv_field(&measurement.device_id),
-            measurement.level_db,
-            csv_field(
-                &measurement
-                    .weighting
-                    .map(|value| value.to_string())
-                    .unwrap_or_default()
-            ),
-            csv_field(
-                &measurement
-                    .response
-                    .map(|value| value.to_string())
-                    .unwrap_or_default()
-            ),
-            csv_field(&measurement.raw),
+        .write_all(
+            b"timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n",
         )
         .map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?;
+    for measurement in measurements {
+        write_stored_measurement(&mut writer, measurement)
+            .map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?;
     }
     writer
         .flush()
         .map_err(|error| format!("Kunne ikke afslutte måleeksporten: {error}"))
+}
+
+fn write_stored_measurement(
+    writer: &mut BufWriter<File>,
+    measurement: &StoredMeasurement,
+) -> Result<(), String> {
+    writeln!(
+        writer,
+        "{},{},{},{},{},{},{},{},{}",
+        csv_field(&measurement.timestamp.to_rfc3339()),
+        csv_field(&measurement.device_id),
+        measurement.level_db,
+        measurement.minimum_db,
+        measurement.maximum_db,
+        measurement.sample_count,
+        csv_field(
+            &measurement
+                .weighting
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        ),
+        csv_field(
+            &measurement
+                .response
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        ),
+        csv_field(&measurement.raw),
+    )
+    .map_err(|error| format!("Kunne ikke gemme målingen: {error}"))
 }
 
 fn write_marker_export(path: &Path, markers: &[Marker]) -> Result<(), String> {
@@ -471,7 +583,7 @@ fn session_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(result)
 }
 
-fn read_measurements(directory: &Path) -> Result<Vec<Measurement>, String> {
+fn read_measurements(directory: &Path) -> Result<Vec<StoredMeasurement>, String> {
     let mut measurements = Vec::new();
     let entries =
         fs::read_dir(directory).map_err(|error| format!("Kunne ikke læse måledata: {error}"))?;
@@ -485,36 +597,51 @@ fn read_measurements(directory: &Path) -> Result<Vec<Measurement>, String> {
         for line in BufReader::new(file).lines().skip(1) {
             let line = line.map_err(|error| format!("Kunne ikke læse en måling: {error}"))?;
             let fields = parse_csv_line(&line)?;
-            if fields.len() != 6 {
-                continue;
-            }
-            measurements.push(Measurement {
-                timestamp: DateTime::parse_from_rfc3339(&fields[0])
-                    .map_err(|error| format!("Ugyldigt måletidspunkt: {error}"))?
-                    .with_timezone(&Utc),
-                device_id: fields[1].clone(),
-                level_db: fields[2]
-                    .parse()
-                    .map_err(|error| format!("Ugyldigt lydniveau: {error}"))?,
-                weighting: if fields[3].is_empty() {
-                    None
-                } else {
-                    Some(fields[3].parse()?)
+            let timestamp = DateTime::parse_from_rfc3339(&fields[0])
+                .map_err(|error| format!("Ugyldigt måletidspunkt: {error}"))?
+                .with_timezone(&Utc);
+            let level_db = fields[2]
+                .parse()
+                .map_err(|error| format!("Ugyldigt lydniveau: {error}"))?;
+            let measurement = match fields.len() {
+                6 => StoredMeasurement {
+                    timestamp,
+                    device_id: fields[1].clone(),
+                    level_db,
+                    minimum_db: level_db,
+                    maximum_db: level_db,
+                    sample_count: 1,
+                    weighting: parse_optional(&fields[3])?,
+                    response: parse_optional(&fields[4])?,
+                    raw: fields[5].clone(),
                 },
-                response: if fields[4].is_empty() {
-                    None
-                } else {
-                    Some(fields[4].parse()?)
+                9 => StoredMeasurement {
+                    timestamp,
+                    device_id: fields[1].clone(),
+                    level_db,
+                    minimum_db: fields[3]
+                        .parse()
+                        .map_err(|error| format!("Ugyldigt minimumsniveau: {error}"))?,
+                    maximum_db: fields[4]
+                        .parse()
+                        .map_err(|error| format!("Ugyldigt maksimumsniveau: {error}"))?,
+                    sample_count: fields[5]
+                        .parse()
+                        .map_err(|error| format!("Ugyldigt antal samples: {error}"))?,
+                    weighting: parse_optional(&fields[6])?,
+                    response: parse_optional(&fields[7])?,
+                    raw: fields[8].clone(),
                 },
-                raw: fields[5].clone(),
-            });
+                _ => continue,
+            };
+            measurements.push(measurement);
         }
     }
     measurements.sort_by_key(|measurement| measurement.timestamp);
     Ok(measurements)
 }
 
-fn summarize(session: &Session, measurements: &[Measurement]) -> SessionSummary {
+fn summarize(session: &Session, measurements: &[StoredMeasurement]) -> SessionSummary {
     let average_db = if measurements.is_empty() {
         None
     } else {
@@ -560,7 +687,10 @@ fn summarize(session: &Session, measurements: &[Measurement]) -> SessionSummary 
         interrupted: session.interrupted,
         responsible_engineer_name: session.responsible_engineer_name.clone(),
         device_count: session.devices.len(),
-        sample_count: measurements.len(),
+        sample_count: measurements
+            .iter()
+            .map(|measurement| measurement.sample_count)
+            .sum(),
         minimum_db: statistics.minimum_db,
         maximum_db: statistics.maximum_db,
         average_db,
@@ -597,6 +727,17 @@ fn csv_field(value: &str) -> String {
     }
 }
 
+fn parse_optional<T>(value: &str) -> Result<Option<T>, String>
+where
+    T: FromStr<Err = String>,
+{
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        value.parse().map(Some)
+    }
+}
+
 fn parse_csv_line(line: &str) -> Result<Vec<String>, String> {
     let mut fields = Vec::new();
     let mut field = String::new();
@@ -626,10 +767,24 @@ fn parse_csv_line(line: &str) -> Result<Vec<String>, String> {
 mod tests {
     use std::fs;
 
-    use chrono::{Local, Utc};
+    use chrono::{Duration, Local, Timelike, Utc};
     use sound_monitor::measurement::{FrequencyWeighting, Measurement, TimeWeighting};
 
-    use super::{csv_field, parse_csv_line, AddMarkerRequest, SessionStore, StartSessionRequest};
+    use super::{
+        csv_field, parse_csv_line, read_measurements, AddMarkerRequest, SessionStore,
+        StartSessionRequest,
+    };
+
+    fn measurement(timestamp: chrono::DateTime<Utc>, level_db: f32) -> Measurement {
+        Measurement {
+            timestamp,
+            device_id: "digital-sound-8922:test".to_owned(),
+            level_db,
+            weighting: Some(FrequencyWeighting::A),
+            response: Some(TimeWeighting::Fast),
+            raw: format!("N:{level_db:05.1}"),
+        }
+    }
 
     #[test]
     fn csv_round_trip_preserves_device_payload() {
@@ -710,6 +865,69 @@ mod tests {
     }
 
     #[test]
+    fn stores_one_energy_bucket_per_second_with_range_and_raw_sample_count() {
+        let container = std::env::temp_dir().join(format!(
+            "sound-monitor-buckets-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let root = container.join("Sessions");
+        let store = SessionStore::new(root).unwrap();
+        let session = store
+            .start(StartSessionRequest {
+                title: "Bucket test".to_owned(),
+                event_type: "rehearsal".to_owned(),
+                event_date: Local::now().date_naive(),
+                responsible_engineer_name: None,
+                devices: Vec::new(),
+            })
+            .unwrap();
+        let start = Utc::now().with_nanosecond(0).unwrap();
+        store.record(&measurement(start, 80.0)).unwrap();
+        store
+            .record(&measurement(start + Duration::milliseconds(300), 90.0))
+            .unwrap();
+        store.stop().unwrap();
+
+        let detail = store.load(&session.id).unwrap();
+        assert_eq!(detail.measurements.len(), 1);
+        let bucket = &detail.measurements[0];
+        assert!((bucket.level_db - 87.4).abs() < 0.1);
+        assert_eq!(bucket.minimum_db, 80.0);
+        assert_eq!(bucket.maximum_db, 90.0);
+        assert_eq!(bucket.sample_count, 2);
+
+        let summary = store.list().unwrap().remove(0);
+        assert_eq!(summary.sample_count, 2);
+        assert_eq!(summary.minimum_db, Some(80.0));
+        assert_eq!(summary.maximum_db, Some(90.0));
+
+        fs::remove_dir_all(container).unwrap();
+    }
+
+    #[test]
+    fn reads_legacy_six_column_measurements() {
+        let directory = std::env::temp_dir().join(format!(
+            "sound-monitor-legacy-csv-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("measurements-legacy.csv"),
+            "timestamp,deviceId,levelDb,weighting,response,raw\n2026-08-30T10:00:00Z,legacy,82.5,A,Fast,N:082.5\n",
+        )
+        .unwrap();
+
+        let measurements = read_measurements(&directory).unwrap();
+        assert_eq!(measurements.len(), 1);
+        assert_eq!(measurements[0].level_db, 82.5);
+        assert_eq!(measurements[0].minimum_db, 82.5);
+        assert_eq!(measurements[0].maximum_db, 82.5);
+        assert_eq!(measurements[0].sample_count, 1);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn recovers_an_interrupted_session_at_its_last_measurement() {
         let container = std::env::temp_dir().join(format!(
             "sound-monitor-recovery-{}",
@@ -728,15 +946,9 @@ mod tests {
                 })
                 .unwrap();
             let measurement_time = Utc::now();
+            store.record(&measurement(measurement_time, 72.3)).unwrap();
             store
-                .record(&Measurement {
-                    timestamp: measurement_time,
-                    device_id: "digital-sound-8922:test".to_owned(),
-                    level_db: 72.3,
-                    weighting: Some(FrequencyWeighting::A),
-                    response: Some(TimeWeighting::Fast),
-                    raw: "N:072.3".to_owned(),
-                })
+                .record(&measurement(measurement_time + Duration::seconds(1), 72.4))
                 .unwrap();
             (session.id, measurement_time)
         };

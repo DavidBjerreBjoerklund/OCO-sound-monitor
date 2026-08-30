@@ -51,7 +51,9 @@ function calculateStats(measurements: Measurement[]) {
   if (!measurements.length) return null;
   const levels = measurements.map((measurement) => measurement.levelDb);
   const leq = 10 * Math.log10(levels.reduce((sum, value) => sum + 10 ** (value / 10), 0) / levels.length);
-  return { min: Math.min(...levels), max: Math.max(...levels), leq };
+  const minimums = measurements.map((measurement) => measurement.minimumDb ?? measurement.levelDb);
+  const maximums = measurements.map((measurement) => measurement.maximumDb ?? measurement.levelDb);
+  return { min: Math.min(...minimums), max: Math.max(...maximums), leq };
 }
 
 function calculateRedZoneSeconds(measurements: Measurement[]): number {
@@ -105,7 +107,11 @@ function levelStatus(level: number | undefined) {
 
 function Chart({ measurements, markers = [], emptyText, recentPeak }: { measurements: Measurement[]; markers?: Marker[]; emptyText: string; recentPeak?: number | null }) {
   const levelGradientId = `level-gradient-${useId().replaceAll(":", "")}`;
-  const data = measurements.map((measurement) => ({ at: new Date(measurement.timestamp).getTime(), level: measurement.levelDb }));
+  const data = measurements.map((measurement) => ({
+    at: new Date(measurement.timestamp).getTime(),
+    level: measurement.levelDb,
+    maximum: measurement.maximumDb,
+  }));
   return <div className="chart-wrap" aria-label="Lydniveaugraf">
     {data.length > 1 ? <ResponsiveContainer width="100%" height="100%">
       <LineChart data={data} margin={{ top: 10, right: 18, bottom: 4, left: -18 }}>
@@ -125,12 +131,13 @@ function Chart({ measurements, markers = [], emptyText, recentPeak }: { measurem
         <CartesianGrid stroke="#303531" vertical={false} />
         <XAxis dataKey="at" type="number" domain={["dataMin", "dataMax"]} stroke="#7f8982" tickLine={false} axisLine={false} minTickGap={64} tick={{ fontSize: 11 }} tickFormatter={(value) => formatChartTime(new Date(value).toISOString())} />
         <YAxis domain={[30, 110]} ticks={[30, 50, 70, 90, 110]} stroke="#7f8982" tickLine={false} axisLine={false} tick={{ fontSize: 11 }} />
-        <Tooltip contentStyle={{ background: "#202421", border: "1px solid #3b423d", borderRadius: 4, color: "#f0f2ee" }} formatter={(value) => [`${Number(value).toFixed(1)} dB`, "Niveau"]} labelFormatter={(value) => formatChartTime(new Date(Number(value)).toISOString())} labelStyle={{ color: "#9aa39d" }} />
+        <Tooltip contentStyle={{ background: "#202421", border: "1px solid #3b423d", borderRadius: 4, color: "#f0f2ee" }} formatter={(value, name) => [`${Number(value).toFixed(1)} dB`, name === "maximum" ? "Kort top" : "Niveau"]} labelFormatter={(value) => formatChartTime(new Date(Number(value)).toISOString())} labelStyle={{ color: "#9aa39d" }} />
         <ReferenceLine y={82} stroke="#caa23f" strokeDasharray="4 4" label={{ value: "82", position: "insideRight", fill: "#d9b64f", fontSize: 10 }} />
         <ReferenceLine y={90} stroke="#df6657" strokeDasharray="4 4" label={{ value: "90", position: "insideRight", fill: "#f07a6b", fontSize: 10 }} />
         {recentPeak !== null && recentPeak !== undefined && <ReferenceLine y={recentPeak} stroke="#a9b2ac" strokeDasharray="2 5" strokeOpacity={0.75} label={{ value: "Seneste top", position: "insideTopLeft", fill: "#a9b2ac", fontSize: 10 }} />}
         {markers.map((marker) => <ReferenceLine key={marker.id} x={new Date(marker.timestamp).getTime()} stroke="#48c9b0" strokeDasharray="3 3" label={{ value: marker.label, position: "insideTopRight", fill: "#8de0cf", fontSize: 10 }} />)}
         <Line type="monotone" dataKey="level" stroke={`url(#${levelGradientId})`} strokeWidth={2} dot={false} isAnimationActive={false} />
+        <Line type="monotone" dataKey="maximum" stroke="#ef8b7e" strokeWidth={1.1} strokeOpacity={0.5} dot={false} connectNulls={false} isAnimationActive={false} />
       </LineChart>
     </ResponsiveContainer> : <div className="chart-empty"><Activity size={26} /><span>{emptyText}</span></div>}
   </div>;
@@ -139,11 +146,12 @@ function Chart({ measurements, markers = [], emptyText, recentPeak }: { measurem
 function Stats({ measurements }: { measurements: Measurement[] }) {
   const stats = calculateStats(measurements);
   const redZone = formatElapsed(calculateRedZoneSeconds(measurements));
+  const sampleCount = measurements.reduce((sum, measurement) => sum + (measurement.sampleCount ?? 1), 0);
   return <div className="stats-strip">
     <div><span>Minimum</span><strong>{stats ? stats.min.toFixed(1) : "--.-"}</strong><small>dB</small></div>
     <div><span>Leq</span><strong>{stats ? stats.leq.toFixed(1) : "--.-"}</strong><small>dB</small></div>
     <div><span>Maksimum</span><strong>{stats ? stats.max.toFixed(1) : "--.-"}</strong><small>dB</small></div>
-    <div><span>Samples</span><strong>{measurements.length}</strong><small>stk.</small></div>
+    <div><span>Samples</span><strong>{sampleCount}</strong><small>stk.</small></div>
     <div className="red-zone-stat"><span>Tid i rød zone</span><strong>{redZone}</strong><small>≥ {RED_ZONE_DB} dB</small></div>
   </div>;
 }

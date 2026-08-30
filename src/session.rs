@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::measurement::{FrequencyWeighting, TimeWeighting};
 use crate::person::CrewMember;
 
-pub const SESSION_FORMAT_VERSION: u32 = 1;
+pub const SESSION_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

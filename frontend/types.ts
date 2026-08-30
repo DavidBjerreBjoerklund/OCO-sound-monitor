@@ -20,6 +20,9 @@ export interface Measurement {
   timestamp: string;
   deviceId: string;
   levelDb: number;
+  minimumDb?: number;
+  maximumDb?: number;
+  sampleCount?: number;
   weighting: FrequencyWeighting | null;
   response: TimeWeighting | null;
   raw: string;

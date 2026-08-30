@@ -43,7 +43,9 @@ The LIVE workspace currently provides:
 - editable session title, event type, date, and responsible engineer,
 - template-based session suggestions implemented outside the UI.
 - crash-resistant, file-based session storage managed by Rust,
-- append-only per-device CSV measurement files,
+- one energy-based storage bucket per device and second, preserving Leq,
+  minimum, maximum, and the original sample count,
+- append-only per-device CSV measurement files flushed in five-bucket batches,
 - JSON metadata with explicit A/C/D/Z and Fast/Slow settings,
 - searchable archive with session graph, statistics, devices, and engineer.
 - dedicated Statistics workspace with date, event, engineer, measurement-profile,
@@ -68,6 +70,11 @@ Sessions are stored below the platform-specific application data directory in
 `session.json` file and one CSV file per device that produced measurements.
 Exports are written beside `Sessions` in the platform-specific `Exports`
 directory, with a separate timestamped folder for each export operation.
+Legacy six-column measurement files remain readable. New files use the columns
+`timestamp`, `deviceId`, `levelDb`, `minimumDb`, `maximumDb`, `sampleCount`,
+`weighting`, `response`, and `raw`; `levelDb` is the energy-based Leq for that
+second and `raw` contains the final source line observed in the bucket. Sessions
+using this compact measurement format have `formatVersion: 2`.
 
 ## Driver CLI
 

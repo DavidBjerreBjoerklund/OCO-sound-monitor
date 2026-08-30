@@ -1,5 +1,6 @@
 use serde::Serialize;
-use sound_monitor::measurement::Measurement;
+
+use crate::storage::StoredMeasurement;
 
 const RED_ZONE_DB: f64 = 90.0;
 const COMPARISON_BIN_COUNT: usize = 24;
@@ -41,7 +42,7 @@ pub struct ComparisonSeries {
     pub points: Vec<AggregatePoint>,
 }
 
-pub fn calculate_statistics(measurements: &[Measurement]) -> MeasurementStatistics {
+pub fn calculate_statistics(measurements: &[StoredMeasurement]) -> MeasurementStatistics {
     let mut points: Vec<_> = measurements
         .iter()
         .filter(|measurement| measurement.level_db.is_finite())
@@ -54,11 +55,11 @@ pub fn calculate_statistics(measurements: &[Measurement]) -> MeasurementStatisti
 
     let minimum_db = points
         .iter()
-        .map(|measurement| measurement.level_db)
+        .map(|measurement| measurement.minimum_db)
         .reduce(f32::min);
     let maximum_db = points
         .iter()
-        .map(|measurement| measurement.level_db)
+        .map(|measurement| measurement.maximum_db)
         .reduce(f32::max);
 
     if points.len() == 1 {
@@ -127,7 +128,7 @@ pub fn calculate_statistics(measurements: &[Measurement]) -> MeasurementStatisti
     }
 }
 
-pub fn aggregate_sessions(sessions: &[Vec<Measurement>]) -> ComparisonSeries {
+pub fn aggregate_sessions(sessions: &[Vec<StoredMeasurement>]) -> ComparisonSeries {
     let binned: Vec<_> = sessions
         .iter()
         .filter_map(|measurements| session_bins(measurements))
@@ -157,7 +158,7 @@ pub fn aggregate_sessions(sessions: &[Vec<Measurement>]) -> ComparisonSeries {
     }
 }
 
-fn continuity_limit_ms(points: &[&Measurement]) -> f64 {
+fn continuity_limit_ms(points: &[&StoredMeasurement]) -> f64 {
     let mut deltas: Vec<_> = points
         .windows(2)
         .map(|pair| (pair[1].timestamp - pair[0].timestamp).num_milliseconds())
@@ -229,7 +230,7 @@ fn unweighted_quantile(values: &[f32], quantile: f64) -> Option<f32> {
     Some(values[lower] + (values[upper] - values[lower]) * fraction)
 }
 
-fn session_bins(measurements: &[Measurement]) -> Option<Vec<Option<f32>>> {
+fn session_bins(measurements: &[StoredMeasurement]) -> Option<Vec<Option<f32>>> {
     let mut points: Vec<_> = measurements
         .iter()
         .filter(|measurement| measurement.level_db.is_finite())
@@ -258,17 +259,20 @@ fn session_bins(measurements: &[Measurement]) -> Option<Vec<Option<f32>>> {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use sound_monitor::measurement::Measurement;
 
     use super::{aggregate_sessions, calculate_statistics};
+    use crate::storage::StoredMeasurement;
 
-    fn measurement(second: i64, level_db: f32) -> Measurement {
-        Measurement {
+    fn measurement(second: i64, level_db: f32) -> StoredMeasurement {
+        StoredMeasurement {
             timestamp: Utc
                 .with_ymd_and_hms(2026, 8, 30, 10, 0, second as u32)
                 .unwrap(),
             device_id: "test".to_owned(),
             level_db,
+            minimum_db: level_db,
+            maximum_db: level_db,
+            sample_count: 1,
             weighting: None,
             response: None,
             raw: level_db.to_string(),
