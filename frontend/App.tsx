@@ -101,12 +101,26 @@ function levelStatus(level: number | undefined, language: Language) {
   return { tone: "safe", label: translate(language, "good") };
 }
 
+function chartLevel(measurements: Measurement[], index: number): number {
+  const measurement = measurements[index];
+  const maximum = measurement.maximumDb;
+  if (maximum === undefined || index === 0 || index === measurements.length - 1) {
+    return measurement.levelDb;
+  }
+
+  const previousMaximum = measurements[index - 1].maximumDb ?? measurements[index - 1].levelDb;
+  const nextMaximum = measurements[index + 1].maximumDb ?? measurements[index + 1].levelDb;
+  const isLocalPeak = maximum > measurement.levelDb
+    && maximum >= previousMaximum
+    && maximum > nextMaximum;
+  return isLocalPeak ? maximum : measurement.levelDb;
+}
+
 function Chart({ measurements, markers = [], emptyText, recentPeak, language }: { measurements: Measurement[]; markers?: Marker[]; emptyText: string; recentPeak?: number | null; language: Language }) {
   const levelGradientId = `level-gradient-${useId().replaceAll(":", "")}`;
-  const data = measurements.map((measurement) => ({
+  const data = measurements.map((measurement, index) => ({
     at: new Date(measurement.timestamp).getTime(),
-    level: measurement.levelDb,
-    maximum: measurement.maximumDb,
+    level: chartLevel(measurements, index),
   }));
   return <div className="chart-wrap" aria-label={translate(language, "soundLevelChart")}>
     {data.length > 1 ? <ResponsiveContainer width="100%" height="100%">
@@ -127,13 +141,12 @@ function Chart({ measurements, markers = [], emptyText, recentPeak, language }: 
         <CartesianGrid stroke="#303531" vertical={false} />
         <XAxis dataKey="at" type="number" domain={["dataMin", "dataMax"]} stroke="#7f8982" tickLine={false} axisLine={false} minTickGap={64} tick={{ fontSize: 11 }} tickFormatter={(value) => formatChartTime(new Date(value).toISOString(), language)} />
         <YAxis domain={[30, 110]} ticks={[30, 50, 70, 90, 110]} stroke="#7f8982" tickLine={false} axisLine={false} tick={{ fontSize: 11 }} />
-        <Tooltip contentStyle={{ background: "#202421", border: "1px solid #3b423d", borderRadius: 4, color: "#f0f2ee" }} formatter={(value, name) => [`${Number(value).toFixed(1)} dB`, name === "maximum" ? translate(language, "shortPeak") : translate(language, "level")]} labelFormatter={(value) => formatChartTime(new Date(Number(value)).toISOString(), language)} labelStyle={{ color: "#9aa39d" }} />
+        <Tooltip contentStyle={{ background: "#202421", border: "1px solid #3b423d", borderRadius: 4, color: "#f0f2ee" }} formatter={(value) => [`${Number(value).toFixed(1)} dB`, translate(language, "level")]} labelFormatter={(value) => formatChartTime(new Date(Number(value)).toISOString(), language)} labelStyle={{ color: "#9aa39d" }} />
         <ReferenceLine y={82} stroke="#caa23f" strokeDasharray="4 4" label={{ value: "82", position: "insideRight", fill: "#d9b64f", fontSize: 10 }} />
         <ReferenceLine y={90} stroke="#df6657" strokeDasharray="4 4" label={{ value: "90", position: "insideRight", fill: "#f07a6b", fontSize: 10 }} />
         {recentPeak !== null && recentPeak !== undefined && <ReferenceLine y={recentPeak} stroke="#a9b2ac" strokeDasharray="2 5" strokeOpacity={0.75} label={{ value: translate(language, "recentPeak"), position: "insideTopLeft", fill: "#a9b2ac", fontSize: 10 }} />}
         {markers.map((marker) => <ReferenceLine key={marker.id} x={new Date(marker.timestamp).getTime()} stroke="#48c9b0" strokeDasharray="3 3" label={{ value: marker.label, position: "insideTopRight", fill: "#8de0cf", fontSize: 10 }} />)}
         <Line type="monotone" dataKey="level" stroke={`url(#${levelGradientId})`} strokeWidth={2} dot={false} isAnimationActive={false} />
-        <Line type="monotone" dataKey="maximum" stroke="#ef8b7e" strokeWidth={1.1} strokeOpacity={0.5} dot={false} connectNulls={false} isAnimationActive={false} />
       </LineChart>
     </ResponsiveContainer> : <div className="chart-empty"><Activity size={26} /><span>{emptyText}</span></div>}
   </div>;
