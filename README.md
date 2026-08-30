@@ -68,6 +68,22 @@ The LIVE workspace currently provides:
 Sessions are stored below the platform-specific application data directory in
 `Sound Monitor/Sessions/<year>/<session-id>/`. Each folder contains a
 `session.json` file and one CSV file per device that produced measurements.
+On first launch, the bundled `sound-monitor.ini` is copied directly into the
+`Sessions` directory. This active settings file contains the local service start
+time and the ordered list of classifications shown in the application:
+
+```ini
+[service]
+start_time = 10:30
+
+[classifications]
+service = Gudstjeneste
+soundcheck = Lydprøve
+```
+
+Classification identifiers use ASCII letters, digits, and hyphens, while labels
+may use normal UTF-8 text. Restart Sound Monitor after editing the file. Existing
+sessions retain their stored classification if its INI entry is later removed.
 Exports are written beside `Sessions` in the platform-specific `Exports`
 directory, with a separate timestamped folder for each export operation.
 Legacy six-column measurement files remain readable. New files use the columns

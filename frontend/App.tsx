@@ -10,11 +10,11 @@ import {
 } from "recharts";
 import {
   addMarker, compareSessions, connectDevice, deleteSession, disconnectDevice, exportSession,
-  isDesktopRuntime, libraryLocation, listDevices, listSessions, loadSession, startSession,
+  getSettings, isDesktopRuntime, libraryLocation, listDevices, listSessions, loadSession, startSession,
   stopSession, suggestSession,
 } from "./bridge";
 import type {
-  ConnectionStatus, DeviceDescriptor, DeviceEvent, FrequencyWeighting,
+  AppSettings, ConnectionStatus, DeviceDescriptor, DeviceEvent, FrequencyWeighting,
   Marker, Measurement, Session, SessionDetail, SessionSummary, TimeWeighting,
 } from "./types";
 import StatisticsView from "./StatisticsView";
@@ -22,11 +22,6 @@ import { recentMaximum, rollingLeq } from "./liveMetrics";
 
 const MAX_CHART_POINTS = 540;
 const RED_ZONE_DB = 90;
-const eventLabels: Record<string, string> = {
-  service: "Gudstjeneste", "worship-night": "Lovsangsaften", concert: "Koncert",
-  conference: "Konference", rehearsal: "Prøve", special: "Særligt event",
-};
-
 function formatClock(date: Date): string {
   return new Intl.DateTimeFormat("da-DK", { weekday: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(date);
 }
@@ -167,6 +162,7 @@ function App() {
   const [response, setResponse] = useState<TimeWeighting>("Fast");
   const [clock, setClock] = useState(new Date());
   const [error, setError] = useState<string | null>(null);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [title, setTitle] = useState("");
   const [eventType, setEventType] = useState("service");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
@@ -200,6 +196,7 @@ function App() {
 
   useEffect(() => {
     void refreshDevices();
+    void getSettings().then(setSettings).catch((reason) => setError(String(reason)));
     void suggestSession().then((suggestion) => {
       setTitle(suggestion.draft.title ?? ""); setEventType(suggestion.draft.eventType ?? "service");
       setDate(suggestion.draft.date ?? new Date().toISOString().slice(0, 10));
@@ -317,6 +314,11 @@ function App() {
     }
   };
 
+  const classifications = settings?.classifications ?? [];
+  const eventLabels = Object.fromEntries(classifications.map((classification) => [classification.id, classification.label]));
+  const classificationOptions = classifications.some((classification) => classification.id === eventType)
+    ? classifications
+    : [...classifications, { id: eventType, label: eventType }];
   const filteredArchive = archive.filter((session) => `${session.title} ${eventLabels[session.eventType] ?? session.eventType} ${session.responsibleEngineerName ?? ""}`.toLocaleLowerCase("da").includes(archiveSearch.toLocaleLowerCase("da")));
   const latest = measurements.at(-1);
   const shortTermLevel = rollingLeq(measurements, 10);
@@ -346,7 +348,7 @@ function App() {
       <aside className="session-panel">
         <div className="panel-heading"><span className={`record-indicator ${activeSession ? "active" : ""}`} /><div><span className="eyebrow">Session</span><h2>{activeSession ? "Optager" : "Klar"}</h2></div></div>
         <label className="field"><span>Titel</span><input value={title} onChange={(event) => setTitle(event.target.value)} disabled={!!activeSession} /></label>
-        <label className="field"><span>Eventtype</span><select value={eventType} onChange={(event) => setEventType(event.target.value)} disabled={!!activeSession}>{Object.entries(eventLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+        <label className="field"><span>Klassifikation</span><select value={eventType} onChange={(event) => setEventType(event.target.value)} disabled={!!activeSession}>{classificationOptions.map((classification) => <option value={classification.id} key={classification.id}>{classification.label}</option>)}</select></label>
         <label className="field"><span>Dato</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} disabled={!!activeSession} /></label>
         <label className="field"><span className="field-label-icon"><Users size={14} /> Lydansvarlig</span><input value={engineer} onChange={(event) => setEngineer(event.target.value)} placeholder="Skriv navn" disabled={!!activeSession} /></label>
         <div className="session-meta"><span>Start</span><strong>{activeSession ? new Date(activeSession.started).toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" }) : "--:--"}</strong></div>
@@ -390,7 +392,7 @@ function App() {
         {selectedSession ? <><div className="metadata-list"><div><span><Clock3 size={13} /> Varighed</span><strong>{duration(selectedSession.session.started, selectedSession.session.ended)}</strong></div>{selectedSession.session.interrupted && <div className="recovered-session"><span><RefreshCw size={13} /> Status</span><strong>Gendannet efter afbrydelse</strong></div>}<div><span><Users size={13} /> Lydansvarlig</span><strong>{selectedSession.session.responsibleEngineerName || "Ikke angivet"}</strong></div><div><span><Cable size={13} /> Enheder</span><strong>{selectedSession.session.devices.length}</strong></div>{selectedSession.session.devices.map((device) => <div className="device-record" key={device.id}><span>{device.name}</span><strong>dB{device.weighting ?? "?"} · {device.response ?? "Ukendt"}</strong></div>)}</div><div className="marker-list"><div className="marker-list-heading"><Flag size={13} /><span>Markører</span><strong>{selectedSession.session.markers.length}</strong></div>{selectedSession.session.markers.map((marker) => <div className="marker-row" key={marker.id}><time>{formatChartTime(marker.timestamp)}</time><strong>{marker.label}</strong>{marker.note && <span>{marker.note}</span>}</div>)}{!selectedSession.session.markers.length && <span className="no-markers">Ingen markører</span>}</div><button className="delete-session-button" type="button" onClick={() => setDeleteCandidate(selectedSession.session)}><Trash2 size={15} /> Slet session</button></> : null}
         <div className="library-path"><span>Lagerplacering</span><code title={archivePath}>{archivePath || "Indlæser..."}</code></div>
       </aside>
-    </main> : <StatisticsView sessions={archive} onRefresh={refreshArchive} onOpenSession={openArchiveSession} loadComparison={compareSessions} />}
+    </main> : <StatisticsView sessions={archive} classifications={classifications} onRefresh={refreshArchive} onOpenSession={openArchiveSession} loadComparison={compareSessions} />}
     {deleteCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleteBusy) setDeleteCandidate(null); }}>
       <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
         <div className="confirm-dialog-header"><div className="danger-icon"><Trash2 size={18} /></div><button className="icon-button" type="button" onClick={() => setDeleteCandidate(null)} disabled={deleteBusy} aria-label="Luk dialog" title="Luk"><X size={16} /></button></div>

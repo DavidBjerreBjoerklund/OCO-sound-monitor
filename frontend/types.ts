@@ -8,6 +8,17 @@ export type ConnectionStatus =
   | "disconnected"
   | "error";
 
+export interface Classification {
+  id: string;
+  label: string;
+}
+
+export interface AppSettings {
+  serviceStartTime: string;
+  classifications: Classification[];
+  filePath: string;
+}
+
 export interface DeviceDescriptor {
   id: string;
   name: string;

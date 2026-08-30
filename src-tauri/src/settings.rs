@@ -1,0 +1,216 @@
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+const SETTINGS_FILE_NAME: &str = "sound-monitor.ini";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Classification {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub service_start_time: String,
+    pub classifications: Vec<Classification>,
+    pub file_path: String,
+}
+
+impl AppSettings {
+    pub fn load(resource_dir: &Path, sessions_dir: &Path) -> Result<Self, String> {
+        fs::create_dir_all(sessions_dir).map_err(|error| {
+            format!(
+                "Kunne ikke oprette sessionsmappen {}: {error}",
+                sessions_dir.display()
+            )
+        })?;
+        let path = sessions_dir.join(SETTINGS_FILE_NAME);
+        if !path.exists() {
+            let source = find_packaged_settings(resource_dir).ok_or_else(|| {
+                format!(
+                    "Kunne ikke finde standardfilen {SETTINGS_FILE_NAME} i {}.",
+                    resource_dir.display()
+                )
+            })?;
+            fs::copy(&source, &path).map_err(|error| {
+                format!(
+                    "Kunne ikke oprette {} fra {}: {error}",
+                    path.display(),
+                    source.display()
+                )
+            })?;
+        }
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| format!("Kunne ikke læse {}: {error}", path.display()))?;
+        parse_settings(&contents, &path)
+    }
+
+    pub fn service_start_minutes(&self) -> u16 {
+        parse_time_minutes(&self.service_start_time)
+            .expect("service start time was validated while loading settings")
+    }
+}
+
+fn find_packaged_settings(resource_dir: &Path) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.push(resource_dir.join(SETTINGS_FILE_NAME));
+    if let Ok(directory) = std::env::current_dir() {
+        candidates.push(directory.join(SETTINGS_FILE_NAME));
+        candidates.push(directory.join("..").join(SETTINGS_FILE_NAME));
+    }
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
+    let mut section = "";
+    let mut service_start_time = None;
+    let mut classifications = Vec::new();
+
+    for (line_index, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim();
+            continue;
+        }
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            format!(
+                "Ugyldig linje {} i {}: forventede nøgle = værdi.",
+                line_index + 1,
+                path.display()
+            )
+        })?;
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() {
+            return Err(format!(
+                "Tom nøgle eller værdi på linje {} i {}.",
+                line_index + 1,
+                path.display()
+            ));
+        }
+
+        match section {
+            "service" if key == "start_time" => service_start_time = Some(value.to_owned()),
+            "classifications" => classifications.push(Classification {
+                id: key.to_owned(),
+                label: value.to_owned(),
+            }),
+            _ => {}
+        }
+    }
+
+    let service_start_time = service_start_time
+        .ok_or_else(|| format!("{} mangler [service] start_time.", path.display()))?;
+    parse_time_minutes(&service_start_time).map_err(|message| {
+        format!(
+            "Ugyldigt [service] start_time i {}: {message}",
+            path.display()
+        )
+    })?;
+    if classifications.is_empty() {
+        return Err(format!(
+            "{} skal indeholde mindst én [classifications]-værdi.",
+            path.display()
+        ));
+    }
+    for classification in &classifications {
+        if !classification
+            .id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            return Err(format!(
+                "Ugyldigt klassifikations-id '{}' i {}. Brug kun a-z, 0-9 og bindestreg.",
+                classification.id,
+                path.display()
+            ));
+        }
+    }
+    let mut seen_ids = HashSet::new();
+    classifications.retain(|classification| seen_ids.insert(classification.id.clone()));
+
+    Ok(AppSettings {
+        service_start_time,
+        classifications,
+        file_path: path.display().to_string(),
+    })
+}
+
+fn parse_time_minutes(value: &str) -> Result<u16, String> {
+    let (hours, minutes) = value
+        .split_once(':')
+        .ok_or_else(|| "brug formatet HH:MM".to_owned())?;
+    let hours = hours
+        .parse::<u16>()
+        .map_err(|_| "timer skal være et tal".to_owned())?;
+    let minutes = minutes
+        .parse::<u16>()
+        .map_err(|_| "minutter skal være et tal".to_owned())?;
+    if hours > 23 || minutes > 59 {
+        return Err("tidspunktet skal være mellem 00:00 og 23:59".to_owned());
+    }
+    Ok(hours * 60 + minutes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use super::{parse_settings, AppSettings, SETTINGS_FILE_NAME};
+
+    #[test]
+    fn parses_service_time_and_ordered_classifications() {
+        let settings = parse_settings(
+            "[service]\nstart_time = 09:45\n\n[classifications]\nservice = Gudstjeneste\nsoundcheck = Lydprøve\n",
+            Path::new("test.ini"),
+        )
+        .unwrap();
+
+        assert_eq!(settings.service_start_minutes(), 9 * 60 + 45);
+        assert_eq!(settings.classifications[0].id, "service");
+        assert_eq!(settings.classifications[1].label, "Lydprøve");
+    }
+
+    #[test]
+    fn rejects_invalid_service_time() {
+        let error = parse_settings(
+            "[service]\nstart_time = 25:00\n[classifications]\nservice = Gudstjeneste\n",
+            Path::new("test.ini"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("00:00 og 23:59"));
+    }
+
+    #[test]
+    fn first_load_copies_settings_into_the_sessions_directory() {
+        let test_root =
+            std::env::temp_dir().join(format!("sound-monitor-settings-{}", std::process::id()));
+        let resource_dir = test_root.join("resources");
+        let sessions_dir = test_root.join("Sessions");
+        fs::create_dir_all(&resource_dir).unwrap();
+        fs::write(
+            resource_dir.join(SETTINGS_FILE_NAME),
+            "[service]\nstart_time = 10:30\n[classifications]\nservice = Gudstjeneste\n",
+        )
+        .unwrap();
+
+        let settings = AppSettings::load(&resource_dir, &sessions_dir).unwrap();
+
+        assert_eq!(
+            settings.file_path,
+            sessions_dir.join(SETTINGS_FILE_NAME).display().to_string()
+        );
+        assert!(sessions_dir.join(SETTINGS_FILE_NAME).is_file());
+        fs::remove_dir_all(test_root).unwrap();
+    }
+}

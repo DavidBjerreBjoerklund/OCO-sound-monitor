@@ -4,19 +4,11 @@ import {
   Area, AreaChart, CartesianGrid, Line, ReferenceLine, ResponsiveContainer,
   Tooltip, XAxis, YAxis,
 } from "recharts";
-import type { ComparisonSeries, SessionSummary } from "./types";
-
-const eventLabels: Record<string, string> = {
-  service: "Gudstjeneste",
-  "worship-night": "Lovsangsaften",
-  concert: "Koncert",
-  conference: "Konference",
-  rehearsal: "Prøve",
-  special: "Særligt event",
-};
+import type { Classification, ComparisonSeries, SessionSummary } from "./types";
 
 interface StatisticsViewProps {
   sessions: SessionSummary[];
+  classifications: Classification[];
   onRefresh: () => Promise<void>;
   onOpenSession: (id: string) => Promise<void>;
   loadComparison: (ids: string[]) => Promise<ComparisonSeries>;
@@ -113,7 +105,7 @@ function AggregateProfile({ comparison }: { comparison: ComparisonSeries | null 
   </div>;
 }
 
-export default function StatisticsView({ sessions, onRefresh, onOpenSession, loadComparison }: StatisticsViewProps) {
+export default function StatisticsView({ sessions, classifications, onRefresh, onOpenSession, loadComparison }: StatisticsViewProps) {
   const [view, setView] = useState<ViewMode>("profiles");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -125,6 +117,14 @@ export default function StatisticsView({ sessions, onRefresh, onOpenSession, loa
   const [comparison, setComparison] = useState<ComparisonSeries | null>(null);
   const [comparisonBusy, setComparisonBusy] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
+  const classificationOptions = useMemo(() => {
+    const configured = new Set(classifications.map((classification) => classification.id));
+    const legacy = [...new Set(sessions
+      .map((session) => session.eventType)
+      .filter((value) => !configured.has(value)))]
+      .map((value) => ({ id: value, label: value }));
+    return [...classifications, ...legacy];
+  }, [classifications, sessions]);
 
   const engineers = useMemo(() => [...new Set(sessions.flatMap((session) => session.responsibleEngineerName ? [session.responsibleEngineerName] : []))].sort((left, right) => left.localeCompare(right, "da")), [sessions]);
   const profiles = useMemo(() => [...new Set(sessions.map(profileLabel))].sort(), [sessions]);
@@ -176,7 +176,7 @@ export default function StatisticsView({ sessions, onRefresh, onOpenSession, loa
     <section className="statistics-filters" aria-label="Filtre">
       <label><span>Fra</span><input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
       <label><span>Til</span><input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
-      <label><span>Eventtype</span><select value={eventType} onChange={(event) => setEventType(event.target.value)}><option value="all">Alle</option>{Object.entries(eventLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+      <label><span>Klassifikation</span><select value={eventType} onChange={(event) => setEventType(event.target.value)}><option value="all">Alle</option>{classificationOptions.map((classification) => <option value={classification.id} key={classification.id}>{classification.label}</option>)}</select></label>
       <label><span>Lydansvarlig</span><select value={engineer} onChange={(event) => setEngineer(event.target.value)}><option value="all">Alle</option>{engineers.map((name) => <option value={name} key={name}>{name}</option>)}</select></label>
       <label><span>Måleprofil</span><select value={profile} onChange={(event) => setProfile(event.target.value)}><option value="all">Alle</option>{profiles.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
       <label><span>Maks. mindst</span><div className="filter-with-unit"><input type="number" min="40" max="140" step="1" value={minimumMaximum} onChange={(event) => setMinimumMaximum(event.target.value)} /><small>dB</small></div></label>

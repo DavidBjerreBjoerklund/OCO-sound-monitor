@@ -12,6 +12,7 @@ import type {
   ExportResult,
   TimeWeighting,
   ComparisonSeries,
+  AppSettings,
 } from "./types";
 
 interface ConnectOptions {
@@ -26,6 +27,23 @@ let mockActive: SessionDetail | null = null;
 
 export function isDesktopRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  if (isDesktopRuntime()) return invoke<AppSettings>("get_settings");
+  return {
+    serviceStartTime: "10:30",
+    filePath: "Preview-hukommelse/Sessions/sound-monitor.ini",
+    classifications: [
+      { id: "service", label: "Gudstjeneste" },
+      { id: "worship-night", label: "Lovsangsaften" },
+      { id: "concert", label: "Koncert" },
+      { id: "conference", label: "Konference" },
+      { id: "rehearsal", label: "Prøve" },
+      { id: "soundcheck", label: "Lydprøve" },
+      { id: "special", label: "Særligt event" },
+    ],
+  };
 }
 
 function seedStatisticsPreview(): void {

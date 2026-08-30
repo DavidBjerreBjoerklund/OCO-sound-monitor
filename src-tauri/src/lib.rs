@@ -1,4 +1,5 @@
 mod manager;
+mod settings;
 mod statistics;
 mod storage;
 
@@ -13,6 +14,7 @@ use sound_monitor::template::{
 use tauri::{Manager, State};
 
 use manager::{ConnectOptions, DeviceEvent, DeviceManager};
+use settings::AppSettings;
 use statistics::ComparisonSeries;
 use storage::{
     AddMarkerRequest, ExportResult, SessionDetail, SessionStore, SessionSummary,
@@ -49,14 +51,22 @@ fn disconnect_device(state: State<'_, DeviceManager>, device_id: String) -> Resu
 }
 
 #[tauri::command]
-fn suggest_session(now_iso: Option<String>) -> Result<SessionSuggestion, String> {
+fn get_settings(state: State<'_, AppSettings>) -> AppSettings {
+    state.inner().clone()
+}
+
+#[tauri::command]
+fn suggest_session(
+    state: State<'_, AppSettings>,
+    now_iso: Option<String>,
+) -> Result<SessionSuggestion, String> {
     let now = match now_iso {
         Some(value) => DateTime::parse_from_rfc3339(&value)
             .map_err(|error| format!("Invalid ISO 8601 timestamp: {error}"))?,
         None => Local::now().fixed_offset(),
     };
 
-    Ok(build_session_suggestion(now))
+    Ok(build_session_suggestion(now, state.service_start_minutes()))
 }
 
 #[tauri::command]
@@ -113,8 +123,17 @@ fn delete_session(state: State<'_, SessionStore>, id: String) -> Result<(), Stri
     state.delete(&id)
 }
 
-fn build_session_suggestion(now: DateTime<FixedOffset>) -> SessionSuggestion {
-    let templates = [default_sunday_service_template()];
+fn build_session_suggestion(
+    now: DateTime<FixedOffset>,
+    service_start_minutes: u16,
+) -> SessionSuggestion {
+    let mut service_template = default_sunday_service_template();
+    let duration = service_template
+        .expected_end_minutes
+        .saturating_sub(service_template.expected_start_minutes);
+    service_template.expected_start_minutes = service_start_minutes;
+    service_template.expected_end_minutes = (service_start_minutes + duration) % (24 * 60);
+    let templates = [service_template];
     let matches = matching_templates(&templates, now);
     let matched_template_ids = matches.iter().map(|template| template.id.clone()).collect();
     let mut draft = SessionDraft {
@@ -137,11 +156,16 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(DeviceManager::default())
         .setup(|app| {
+            let resource_dir = app
+                .path()
+                .resource_dir()
+                .map_err(|error| error.to_string())?;
             let root = app
                 .path()
                 .app_data_dir()
                 .map_err(|error| error.to_string())?
                 .join("Sessions");
+            app.manage(AppSettings::load(&resource_dir, &root)?);
             app.manage(SessionStore::new(root)?);
             Ok(())
         })
@@ -149,6 +173,7 @@ pub fn run() {
             list_devices,
             connect_device,
             disconnect_device,
+            get_settings,
             suggest_session,
             start_session,
             stop_session,
@@ -191,9 +216,20 @@ mod tests {
     fn suggestion_uses_the_rust_template_matcher() {
         let timezone = FixedOffset::east_opt(2 * 60 * 60).unwrap();
         let now = timezone.with_ymd_and_hms(2026, 8, 30, 10, 27, 0).unwrap();
-        let suggestion = build_session_suggestion(now);
+        let suggestion = build_session_suggestion(now, 10 * 60 + 30);
 
         assert_eq!(suggestion.draft.title.as_deref(), Some("Gudstjeneste"));
+        assert_eq!(suggestion.draft.event_type.as_deref(), Some("service"));
+        assert_eq!(suggestion.matched_template_ids, ["sunday-service"]);
+    }
+
+    #[test]
+    fn suggestion_uses_the_configured_service_start_time() {
+        let timezone = FixedOffset::east_opt(2 * 60 * 60).unwrap();
+        let now = timezone.with_ymd_and_hms(2026, 8, 30, 9, 30, 0).unwrap();
+
+        let suggestion = build_session_suggestion(now, 9 * 60 + 30);
+
         assert_eq!(suggestion.draft.event_type.as_deref(), Some("service"));
         assert_eq!(suggestion.matched_template_ids, ["sunday-service"]);
     }
