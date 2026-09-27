@@ -1,3 +1,4 @@
+mod backend;
 mod manager;
 mod settings;
 mod statistics;
@@ -52,8 +53,35 @@ fn disconnect_device(state: State<'_, DeviceManager>, device_id: String) -> Resu
 }
 
 #[tauri::command]
-fn get_settings(state: State<'_, AppSettings>) -> AppSettings {
-    state.inner().clone()
+fn get_settings(state: State<'_, AppSettings>) -> Result<AppSettings, String> {
+    state.reload()
+}
+
+#[tauri::command]
+fn save_settings(state: State<'_, AppSettings>, contents: String) -> Result<AppSettings, String> {
+    state.save(&contents)
+}
+
+#[tauri::command]
+fn get_active_statistics(
+    state: State<'_, SessionStore>,
+) -> Result<Option<storage::LiveStatistics>, String> {
+    state.active_statistics()
+}
+
+#[tauri::command]
+fn open_recordings_folder(state: State<'_, SessionStore>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(target_os = "linux")]
+    let program = "xdg-open";
+    std::process::Command::new(program)
+        .arg(state.root())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -61,6 +89,7 @@ fn suggest_session(
     state: State<'_, AppSettings>,
     now_iso: Option<String>,
 ) -> Result<SessionSuggestion, String> {
+    let state = state.reload()?;
     let now = match now_iso {
         Some(value) => DateTime::parse_from_rfc3339(&value)
             .map_err(|error| format!("Invalid ISO 8601 timestamp: {error}"))?,
@@ -236,6 +265,9 @@ pub fn run() {
             connect_device,
             disconnect_device,
             get_settings,
+            save_settings,
+            get_active_statistics,
+            open_recordings_folder,
             suggest_session,
             start_session,
             stop_session,

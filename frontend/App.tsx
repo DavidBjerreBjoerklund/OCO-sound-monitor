@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useState } from "react";
 import {
   Activity, Archive, Cable, CalendarDays, Check, Circle, Clock3, Download, Eye, EyeOff,
   ChartNoAxesCombined, Flag, FolderOpen, Gauge, HardDrive, Package, Plus, Plug, RefreshCw, Search, Square,
-  Users, Wifi, WifiOff, X,
+  Users, Wifi, WifiOff, X, Settings,
 } from "lucide-react";
 import {
   CartesianGrid, Line, LineChart, ReferenceArea, ReferenceLine, ResponsiveContainer,
@@ -11,13 +11,14 @@ import {
 import {
   addMarker, compareSessions, connectDevice, disconnectDevice, exportMeasurementsCsv, exportSession,
   exportStatisticsCsv,
-  getSettings, isDesktopRuntime, libraryLocation, listDevices, listSessions, loadSession, startSession,
+  getActiveStatistics, getSettings, isDesktopRuntime, libraryLocation, listDevices, listSessions, loadSession, startSession,
   stopSession, suggestSession, setSessionHidden,
 } from "./bridge";
 import type {
-  AppSettings, ConnectionStatus, DeviceDescriptor, DeviceEvent, FrequencyWeighting,
+  LiveStatistics, AppSettings, ConnectionStatus, DeviceDescriptor, DeviceEvent, FrequencyWeighting,
   Marker, Measurement, Session, SessionDetail, SessionSummary, TimeWeighting,
 } from "./types";
+import SetupDialog from "./SetupDialog";
 import StatisticsView from "./StatisticsView";
 import { localeFor, translate, type Language } from "./i18n";
 import { recentMaximum, rollingLeq } from "./liveMetrics";
@@ -47,48 +48,6 @@ function duration(started: string, ended: string | null, language: Language): st
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   return hours ? `${hours} ${translate(language, "hoursShort")} ${minutes} min` : `${minutes} min`;
-}
-
-function calculateStats(measurements: Measurement[]) {
-  if (!measurements.length) return null;
-  const levels = measurements.map((measurement) => measurement.levelDb);
-  const leq = 10 * Math.log10(levels.reduce((sum, value) => sum + 10 ** (value / 10), 0) / levels.length);
-  const minimums = measurements.map((measurement) => measurement.minimumDb ?? measurement.levelDb);
-  const maximums = measurements.map((measurement) => measurement.maximumDb ?? measurement.levelDb);
-  return { min: Math.min(...minimums), max: Math.max(...maximums), leq };
-}
-
-function calculateRedZoneSeconds(measurements: Measurement[]): number {
-  if (measurements.length < 2) return 0;
-  const points = measurements
-    .map((measurement) => ({ timestamp: new Date(measurement.timestamp).getTime(), level: measurement.levelDb }))
-    .filter((point) => Number.isFinite(point.timestamp) && Number.isFinite(point.level))
-    .sort((left, right) => left.timestamp - right.timestamp);
-  const deltas = points.slice(1)
-    .map((point, index) => point.timestamp - points[index].timestamp)
-    .filter((delta) => delta > 0)
-    .sort((left, right) => left - right);
-  if (!deltas.length) return 0;
-  const medianDelta = deltas[Math.floor(deltas.length / 2)];
-  const maximumContinuousGap = Math.min(10_000, Math.max(2_000, medianDelta * 5));
-  let redMilliseconds = 0;
-
-  for (let index = 1; index < points.length; index += 1) {
-    const previous = points[index - 1];
-    const current = points[index];
-    const interval = current.timestamp - previous.timestamp;
-    if (interval <= 0 || interval > maximumContinuousGap) continue;
-    if (previous.level >= RED_ZONE_DB && current.level >= RED_ZONE_DB) {
-      redMilliseconds += interval;
-    } else if (previous.level < RED_ZONE_DB && current.level >= RED_ZONE_DB) {
-      const crossing = (RED_ZONE_DB - previous.level) / (current.level - previous.level);
-      redMilliseconds += interval * (1 - crossing);
-    } else if (previous.level >= RED_ZONE_DB && current.level < RED_ZONE_DB) {
-      const crossing = (previous.level - RED_ZONE_DB) / (previous.level - current.level);
-      redMilliseconds += interval * crossing;
-    }
-  }
-  return redMilliseconds / 1_000;
 }
 
 function formatElapsed(seconds: number): string {
@@ -158,20 +117,19 @@ function Chart({ measurements, markers = [], emptyText, recentPeak, language }: 
   </div>;
 }
 
-function Stats({ measurements, language }: { measurements: Measurement[]; language: Language }) {
-  const stats = calculateStats(measurements);
-  const redZone = formatElapsed(calculateRedZoneSeconds(measurements));
-  const sampleCount = measurements.reduce((sum, measurement) => sum + (measurement.sampleCount ?? 1), 0);
+function Stats({ statistics, language }: { statistics: Pick<LiveStatistics, "minimumDb" | "maximumDb" | "leqDb" | "sampleCount" | "redZoneSeconds"> | null; language: Language }) {
   return <div className="stats-strip">
-    <div><span>{translate(language, "minimum")}</span><strong>{stats ? stats.min.toFixed(1) : "--.-"}</strong><small>dB</small></div>
-    <div><span>Leq</span><strong>{stats ? stats.leq.toFixed(1) : "--.-"}</strong><small>dB</small></div>
-    <div><span>{translate(language, "maximum")}</span><strong>{stats ? stats.max.toFixed(1) : "--.-"}</strong><small>dB</small></div>
-    <div><span>{translate(language, "samples")}</span><strong>{sampleCount}</strong><small>{translate(language, "unitsCount")}</small></div>
-    <div className="red-zone-stat"><span>{translate(language, "timeInRed")}</span><strong>{redZone}</strong><small>≥ {RED_ZONE_DB} dB</small></div>
+    <div><span>{translate(language, "minimum")}</span><strong>{statistics?.minimumDb?.toFixed(1) ?? "--.-"}</strong><small>dB</small></div>
+    <div><span>Leq · {language === "da" ? "hele sessionen" : "whole session"}</span><strong>{statistics?.leqDb?.toFixed(1) ?? "--.-"}</strong><small>dB</small></div>
+    <div><span>{translate(language, "maximum")}</span><strong>{statistics?.maximumDb?.toFixed(1) ?? "--.-"}</strong><small>dB</small></div>
+    <div><span>{translate(language, "samples")}</span><strong>{statistics?.sampleCount ?? 0}</strong><small>{translate(language, "unitsCount")}</small></div>
+    <div className="red-zone-stat"><span>{translate(language, "timeInRed")}</span><strong>{formatElapsed(statistics?.redZoneSeconds ?? 0)}</strong><small>≥ {RED_ZONE_DB} dB</small></div>
   </div>;
 }
 
 function App() {
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [sessionStatistics, setSessionStatistics] = useState<LiveStatistics | null>(null);
   const [mode, setMode] = useState<"live" | "archive" | "statistics">("live");
   const [devices, setDevices] = useState<DeviceDescriptor[]>([]);
   const [selectedPort, setSelectedPort] = useState("");
@@ -233,6 +191,21 @@ function App() {
     return () => window.clearInterval(timer);
   }, [refreshDevices]);
 
+  useEffect(() => {
+    if (!activeSession) return;
+    let cancelled = false;
+    let timer: number;
+    const update = async () => {
+      try {
+        const stats = await getActiveStatistics();
+        if (!cancelled && stats?.sessionId === activeSession.id) setSessionStatistics(stats);
+      } catch (reason) { if (!cancelled) setError(String(reason)); }
+      if (!cancelled) timer = window.setTimeout(() => void update(), 500);
+    };
+    void update();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [activeSession?.id]);
+
   const handleDeviceEvent = useCallback((event: DeviceEvent) => {
     if (event.event === "measurement") {
       setMeasurements((current) => [...current.slice(-(MAX_CHART_POINTS - 1)), event.data.measurement]);
@@ -268,7 +241,11 @@ function App() {
     try {
       setError(null);
       if (activeSession) {
-        await stopSession(); setActiveSession(null); await refreshArchive(); return;
+        const stopped = await stopSession();
+        setActiveSession(null);
+        const detail = await loadSession(stopped.id);
+        if (detail.summary) setSessionStatistics({ ...detail.summary, sessionId: stopped.id });
+        await refreshArchive(); return;
       }
       const descriptor = devices.find((device) => device.serialPort === selectedPort);
       const session = await startSession({
@@ -276,7 +253,7 @@ function App() {
         responsibleEngineerName: engineer.trim() || null,
         devices: activeDeviceId && descriptor ? [{ id: activeDeviceId, name: descriptor.name, driver: descriptor.driver, serialPort: descriptor.serialPort, location: descriptor.location, weighting, response }] : [],
       });
-      setMeasurements([]); setActiveSession(session);
+      setSessionStatistics(null); setMeasurements([]); setActiveSession(session);
     } catch (reason) { setError(String(reason)); }
   };
 
@@ -419,6 +396,7 @@ function App() {
         <button className={`mode-tab ${mode === "live" ? "active" : ""}`} type="button" onClick={() => setMode("live")}><Activity size={15} /> {translate(language, "live")}</button>
         <button className={`mode-tab ${mode === "archive" ? "active" : ""}`} type="button" onClick={() => void openArchive()}><Archive size={15} /> {translate(language, "archive")}</button>
         <button className={`mode-tab ${mode === "statistics" ? "active" : ""}`} type="button" onClick={() => void openStatistics()}><ChartNoAxesCombined size={15} /> {translate(language, "statistics")}</button>
+        <button className={`mode-tab ${setupOpen ? "active" : ""}`} type="button" onClick={() => setSetupOpen(true)} aria-haspopup="dialog"><Settings size={15} /> Setup</button>
       </nav>
       <div className="topbar-status">{!isDesktopRuntime() && <span className="preview-label">Preview</span>}<span className={`status-dot ${connectionStatus}`} aria-hidden="true" /><span>{statusLabel}</span><time>{formatClock(clock, language)}</time></div>
     </header>
@@ -446,7 +424,7 @@ function App() {
           </div>
         </div>
         <Chart language={language} measurements={measurements} markers={activeSession?.markers} recentPeak={recentPeak} emptyText={reconnecting ? translate(language, "availableAfterReconnect") : connected ? translate(language, "waitingForMeasurements") : translate(language, "connectMeter")} />
-        <Stats language={language} measurements={measurements} />
+        <Stats language={language} statistics={sessionStatistics} />
       </section>
 
       <aside className="device-panel">
@@ -467,7 +445,7 @@ function App() {
       <section className="archive-detail">{selectedSession ? <>
         <div className="archive-detail-header"><div><span className="eyebrow">{eventLabels[selectedSession.session.eventType] ?? selectedSession.session.eventType}</span><h1>{selectedSession.session.title}</h1></div><div className="archive-header-actions"><div className="archive-date"><CalendarDays size={15} />{formatDate(selectedSession.session.eventDate, language)}</div>{!selectedSession.session.hidden && <><button className="export-button" type="button" onClick={() => void handleMeasurementExport()} disabled={exportBusy}><Download size={15} /> {translate(language, "measurementData")}</button><button className="icon-button" type="button" onClick={() => void handlePackageExport()} disabled={exportBusy} aria-label={translate(language, "completePackage")} title={translate(language, "completePackage")}><Package size={15} /></button></>}</div></div>
         <Chart language={language} measurements={selectedSession.measurements} markers={selectedSession.session.markers} emptyText={translate(language, "sessionContainsNoMeasurements")} />
-        <Stats language={language} measurements={selectedSession.measurements} />
+        <Stats language={language} statistics={selectedSession.summary ?? archive.find((item) => item.id === selectedSession.session.id) ?? null} />
       </> : <div className="detail-empty"><FolderOpen size={32} /><h2>{translate(language, "viewSession")}</h2><span>{translate(language, "measurementsAppearHere")}</span></div>}</section>
       <aside className="archive-meta-panel">
         <div className="panel-heading compact"><HardDrive size={17} /><div><span className="eyebrow">{translate(language, "details")}</span><h2>{translate(language, "session")}</h2></div></div>
@@ -475,6 +453,7 @@ function App() {
         <div className="library-path"><span>{translate(language, "libraryLocation")}</span><code title={archivePath}>{archivePath || translate(language, "loading")}</code></div>
       </aside>
     </main> : <StatisticsView language={language} sessions={archive.filter((session) => !session.hidden)} classifications={classifications} onRefresh={async () => { setArchive(await listSessions(false)); }} onOpenSession={openArchiveSession} loadComparison={compareSessions} onExportMeasurements={handleFilteredMeasurementExport} onExportStatistics={handleFilteredStatisticsExport} />}
+    {setupOpen && <SetupDialog settings={settings} archivePath={archivePath} onClose={() => setSetupOpen(false)} onSaved={(updated) => { setSettings(updated); document.documentElement.lang = updated.language; }} />}
     {hideCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !hideBusy) setHideCandidate(null); }}>
       <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="hide-dialog-title">
         <div className="confirm-dialog-header"><div className="hide-icon"><EyeOff size={18} /></div><button className="icon-button" type="button" onClick={() => setHideCandidate(null)} disabled={hideBusy} aria-label={translate(language, "close")} title={translate(language, "close")}><X size={16} /></button></div>

@@ -21,9 +21,23 @@ pub struct AppSettings {
     pub service_start_time: String,
     pub classifications: Vec<Classification>,
     pub file_path: String,
+    pub ini_contents: String,
+    pub nextcloud: crate::backend::NextcloudConfig,
 }
 
 impl AppSettings {
+    pub fn reload(&self) -> Result<Self, String> {
+        let path = Path::new(&self.file_path);
+        let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        parse_settings(&contents, path)
+    }
+    pub fn save(&self, contents: &str) -> Result<Self, String> {
+        let path = Path::new(&self.file_path);
+        let settings = parse_settings(contents, path)?;
+        crate::backend::atomic_write(path, contents.as_bytes())?;
+        Ok(settings)
+    }
+
     pub fn load(resource_dir: &Path, sessions_dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(sessions_dir).map_err(|error| {
             format!(
@@ -74,6 +88,7 @@ fn find_packaged_settings(resource_dir: &Path) -> Option<PathBuf> {
 }
 
 fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
+    let mut nextcloud = crate::backend::NextcloudConfig::default();
     let mut section = "";
     let mut language = "da".to_owned();
     let mut soundcheck_start_time = None;
@@ -106,7 +121,21 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
             ));
         }
 
+        if ["password", "token", "secret", "app_password"]
+            .contains(&key.to_ascii_lowercase().as_str())
+        {
+            return Err(
+                "Passwords/tokens must not be stored in INI. Use credential_reference.".into(),
+            );
+        }
         match section {
+            "nextcloud" => match key {
+                "base_url" => nextcloud.base_url = value.into(),
+                "remote_path" => nextcloud.remote_path = value.into(),
+                "username" => nextcloud.username = value.into(),
+                "credential_reference" => nextcloud.credential_reference = value.into(),
+                _ => return Err("Ukendt Nextcloud-indstilling".into()),
+            },
             "general" if key == "language" => language = value.to_ascii_lowercase(),
             "service" if key == "soundcheck_start_time" => {
                 soundcheck_start_time = Some(value.to_owned())
@@ -198,7 +227,10 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
     let mut seen_ids = HashSet::new();
     classifications.retain(|classification| seen_ids.insert(classification.id.clone()));
 
+    nextcloud.validate()?;
     Ok(AppSettings {
+        nextcloud,
+        ini_contents: contents.to_owned(),
         language,
         soundcheck_start_time,
         service_start_time,
@@ -233,6 +265,30 @@ mod tests {
     use std::path::Path;
 
     use super::{parse_settings, AppSettings, SETTINGS_FILE_NAME};
+
+    #[test]
+    fn saves_valid_settings_and_rejects_invalid_or_plaintext_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = super::AppSettings::load(std::path::Path::new(".."), dir.path()).unwrap();
+        let original = std::fs::read(&settings.file_path).unwrap();
+        assert!(settings
+            .save(&settings.ini_contents.replace("10:30", "25:90"))
+            .is_err());
+        assert_eq!(std::fs::read(&settings.file_path).unwrap(), original);
+        assert!(settings
+            .save(&(settings.ini_contents.clone() + "\npassword = secret\n"))
+            .is_err());
+        assert_eq!(std::fs::read(&settings.file_path).unwrap(), original);
+        let updated = settings
+            .save(
+                &settings
+                    .ini_contents
+                    .replace("language = da", "language = en"),
+            )
+            .unwrap();
+        assert_eq!(updated.language, "en");
+        assert_eq!(settings.reload().unwrap().language, "en");
+    }
 
     #[test]
     fn parses_service_time_and_ordered_classifications() {
