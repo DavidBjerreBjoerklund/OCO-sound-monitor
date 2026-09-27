@@ -10,11 +10,16 @@ use serde::{Deserialize, Serialize};
 use sound_monitor::measurement::{FrequencyWeighting, Measurement, TimeWeighting};
 use sound_monitor::session::{Marker, Session, SessionDevice, SESSION_FORMAT_VERSION};
 
-use crate::statistics::{aggregate_sessions, calculate_statistics, ComparisonSeries};
+use crate::statistics::{
+    aggregate_sessions, calculate_statistics, ComparisonSeries, MeasurementStatistics,
+    SessionAccumulator,
+};
 
-const STORAGE_FLUSH_BUCKETS: usize = 5;
+const STORAGE_FLUSH_SAMPLES: usize = 5;
 const SUMMARY_CACHE_FILE: &str = "summary.json";
-const SUMMARY_CACHE_VERSION: u32 = 1;
+const SUMMARY_CACHE_VERSION: u32 = 3;
+pub const STATISTICS_SEMANTICS: &str =
+    "whole-session-v3: energy-time-integral; red>=90dB; per-device; gap<=2s";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +63,7 @@ pub struct SessionSummary {
 pub struct SessionDetail {
     pub session: Session,
     pub measurements: Vec<StoredMeasurement>,
+    pub summary: SessionSummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,105 +113,56 @@ struct ActiveSession {
     directory: PathBuf,
     session: Session,
     writers: HashMap<String, MeasurementWriter>,
+    statistics: SessionAccumulator,
 }
 
 struct MeasurementWriter {
     writer: BufWriter<File>,
-    pending: Option<MeasurementBucket>,
-    buckets_since_flush: usize,
-}
-
-struct MeasurementBucket {
-    second: i64,
-    timestamp: DateTime<Utc>,
-    device_id: String,
-    energy_sum: f64,
-    minimum_db: f32,
-    maximum_db: f32,
-    sample_count: usize,
-    weighting: Option<FrequencyWeighting>,
-    response: Option<TimeWeighting>,
-    raw: String,
-}
-
-impl MeasurementBucket {
-    fn new(measurement: &Measurement) -> Self {
-        Self {
-            second: measurement.timestamp.timestamp(),
-            timestamp: measurement.timestamp,
-            device_id: measurement.device_id.clone(),
-            energy_sum: sound_energy(measurement.level_db),
-            minimum_db: measurement.level_db,
-            maximum_db: measurement.level_db,
-            sample_count: 1,
-            weighting: measurement.weighting,
-            response: measurement.response,
-            raw: measurement.raw.clone(),
-        }
-    }
-
-    fn add(&mut self, measurement: &Measurement) {
-        self.energy_sum += sound_energy(measurement.level_db);
-        self.minimum_db = self.minimum_db.min(measurement.level_db);
-        self.maximum_db = self.maximum_db.max(measurement.level_db);
-        self.sample_count += 1;
-        self.weighting = measurement.weighting;
-        self.response = measurement.response;
-        self.raw.clone_from(&measurement.raw);
-    }
-
-    fn finish(self) -> StoredMeasurement {
-        StoredMeasurement {
-            timestamp: self.timestamp,
-            device_id: self.device_id,
-            level_db: (10.0 * (self.energy_sum / self.sample_count as f64).log10()) as f32,
-            minimum_db: self.minimum_db,
-            maximum_db: self.maximum_db,
-            sample_count: self.sample_count,
-            weighting: self.weighting,
-            response: self.response,
-            raw: self.raw,
-        }
-    }
+    samples_since_flush: usize,
 }
 
 impl MeasurementWriter {
     fn record(&mut self, measurement: &Measurement) -> Result<(), String> {
-        if let Some(bucket) = self.pending.as_mut() {
-            if bucket.second == measurement.timestamp.timestamp() {
-                bucket.add(measurement);
-                return Ok(());
-            }
-        }
-
-        self.finish_pending()?;
-        self.pending = Some(MeasurementBucket::new(measurement));
-        Ok(())
-    }
-
-    fn finish_pending(&mut self) -> Result<(), String> {
-        let Some(bucket) = self.pending.take() else {
-            return Ok(());
-        };
-        write_stored_measurement(&mut self.writer, &bucket.finish())?;
-        self.buckets_since_flush += 1;
-        if self.buckets_since_flush >= STORAGE_FLUSH_BUCKETS {
+        write_stored_measurement(&mut self.writer, &StoredMeasurement::from(measurement))?;
+        self.samples_since_flush += 1;
+        if self.samples_since_flush >= STORAGE_FLUSH_SAMPLES {
             self.flush()?;
         }
         Ok(())
     }
-
     fn flush(&mut self) -> Result<(), String> {
         self.writer
             .flush()
+            .and_then(|_| self.writer.get_ref().sync_data())
             .map_err(|error| format!("Kunne ikke synkronisere målefilen: {error}"))?;
-        self.buckets_since_flush = 0;
+        self.samples_since_flush = 0;
         Ok(())
     }
 }
 
-fn sound_energy(level_db: f32) -> f64 {
-    10_f64.powf(level_db as f64 / 10.0)
+impl From<&Measurement> for StoredMeasurement {
+    fn from(m: &Measurement) -> Self {
+        Self {
+            timestamp: m.timestamp,
+            device_id: m.device_id.clone(),
+            level_db: m.level_db,
+            minimum_db: m.level_db,
+            maximum_db: m.level_db,
+            sample_count: 1,
+            weighting: m.weighting,
+            response: m.response,
+            raw: m.raw.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveStatistics {
+    pub session_id: String,
+    pub sample_count: usize,
+    #[serde(flatten)]
+    pub statistics: MeasurementStatistics,
 }
 
 #[derive(Clone)]
@@ -218,11 +175,21 @@ impl SessionStore {
     pub fn new(root: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&root)
             .map_err(|error| format!("Kunne ikke oprette sessionsmappe: {error}"))?;
+        migrate_logs(&root, chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap())?;
         recover_interrupted_sessions(&root)?;
         Ok(Self {
             root,
             active: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn active_statistics(&self) -> Result<Option<LiveStatistics>, String> {
+        let guard = self.active.lock().map_err(|_| "Sessionslageret er låst.")?;
+        Ok(guard.as_ref().map(|active| LiveStatistics {
+            session_id: active.session.id.clone(),
+            sample_count: active.statistics.sample_count,
+            statistics: active.statistics.snapshot(),
+        }))
     }
 
     pub fn root(&self) -> &Path {
@@ -250,6 +217,7 @@ impl SessionStore {
 
         let session = Session {
             format_version: SESSION_FORMAT_VERSION,
+            statistics_semantics: Some(format!("{STATISTICS_SEMANTICS}; source=raw")),
             id,
             title: request.title.trim().to_owned(),
             event_type: request.event_type,
@@ -272,6 +240,7 @@ impl SessionStore {
             directory,
             session: session.clone(),
             writers: HashMap::new(),
+            statistics: SessionAccumulator::default(),
         });
         Ok(session)
     }
@@ -298,7 +267,6 @@ impl SessionStore {
             return Ok(None);
         };
         for writer in active.writers.values_mut() {
-            writer.finish_pending()?;
             writer.flush()?;
         }
         active.session.ended = Some(ended);
@@ -311,6 +279,9 @@ impl SessionStore {
     }
 
     pub fn record(&self, measurement: &Measurement) -> Result<(), String> {
+        if !measurement.level_db.is_finite() {
+            return Err("Ugyldigt lydniveau".into());
+        }
         let mut guard = self
             .active
             .lock()
@@ -331,15 +302,14 @@ impl SessionStore {
             let mut writer = BufWriter::new(file);
             if is_empty {
                 writer
-                    .write_all(b"timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n")
+                    .write_all(b"timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n# statisticsSemantics: whole-session-v3; source=raw-or-preserved-legacy; see session.json\n")
                     .map_err(|error| format!("Kunne ikke skrive målefilens header: {error}"))?;
             }
             active.writers.insert(
                 measurement.device_id.clone(),
                 MeasurementWriter {
                     writer,
-                    pending: None,
-                    buckets_since_flush: 0,
+                    samples_since_flush: 0,
                 },
             );
         }
@@ -347,7 +317,9 @@ impl SessionStore {
             .writers
             .get_mut(&measurement.device_id)
             .expect("writer was inserted");
-        writer.record(measurement)
+        writer.record(measurement)?;
+        active.statistics.add(&StoredMeasurement::from(measurement));
+        Ok(())
     }
 
     pub fn add_marker(&self, request: AddMarkerRequest) -> Result<Marker, String> {
@@ -394,6 +366,7 @@ impl SessionStore {
             .find(|directory| directory.file_name().and_then(|name| name.to_str()) == Some(id))
             .ok_or_else(|| format!("Sessionen blev ikke fundet: {id}"))?;
         Ok(SessionDetail {
+            summary: summary_for_session(&directory, &read_session_metadata(&directory)?)?,
             session: read_session_metadata(&directory)?,
             measurements: read_measurements(&directory)?,
         })
@@ -649,7 +622,7 @@ fn write_measurement_export(path: &Path, measurements: &[StoredMeasurement]) -> 
     );
     writer
         .write_all(
-            b"timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n",
+            b"timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n# statisticsSemantics: whole-session-v3; source=raw-or-preserved-legacy; see session.json\n",
         )
         .map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?;
     for measurement in measurements {
@@ -662,7 +635,7 @@ fn write_measurement_export(path: &Path, measurements: &[StoredMeasurement]) -> 
 }
 
 fn write_stored_measurement(
-    writer: &mut BufWriter<File>,
+    writer: &mut impl Write,
     measurement: &StoredMeasurement,
 ) -> Result<(), String> {
     writeln!(
@@ -717,21 +690,67 @@ fn write_marker_export(path: &Path, markers: &[Marker]) -> Result<(), String> {
 }
 
 fn write_session_metadata(directory: &Path, session: &Session) -> Result<(), String> {
-    let payload = serde_json::to_vec_pretty(session)
-        .map_err(|error| format!("Kunne ikke serialisere sessionen: {error}"))?;
-    let temporary = directory.join("session.json.tmp");
-    let destination = directory.join("session.json");
-    let mut file = File::create(&temporary)
-        .map_err(|error| format!("Kunne ikke skrive sessionen: {error}"))?;
-    file.write_all(&payload)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("Kunne ikke synkronisere sessionen: {error}"))?;
-    if destination.exists() {
-        fs::remove_file(&destination)
-            .map_err(|error| format!("Kunne ikke opdatere sessionen: {error}"))?;
+    let payload = serde_json::to_vec_pretty(session).map_err(|e| e.to_string())?;
+    crate::backend::atomic_write(&directory.join("session.json"), &payload)
+}
+
+fn migrate_logs(root: &Path, cutoff: NaiveDate) -> Result<usize, String> {
+    let mut count = 0;
+    for directory in session_directories(root)? {
+        let mut session = read_session_metadata(&directory)?;
+        // Fixed requested Copenhagen calendar cutoff; event dates are user-editable,
+        // so eligibility uses the recording start converted to Europe/Copenhagen.
+        let date = session
+            .started
+            .with_timezone(&chrono_tz::Europe::Copenhagen)
+            .date_naive();
+        if date > cutoff
+            || session
+                .statistics_semantics
+                .as_ref()
+                .is_some_and(|s| s.starts_with(STATISTICS_SEMANTICS))
+        {
+            continue;
+        }
+        let measurements = read_measurements_for_migration(&directory)?; // Validate all data before writes.
+        let source = if session.format_version == 2 {
+            "legacy-buckets-approximate: intra-bucket timing and red crossings unavailable"
+        } else {
+            "legacy-raw"
+        };
+        let note = format!("{STATISTICS_SEMANTICS}; source={source}");
+        for entry in fs::read_dir(&directory).map_err(|e| e.to_string())? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("csv")
+                || !path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .starts_with("measurements-")
+            {
+                continue;
+            }
+            let payload = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            if !payload
+                .lines()
+                .any(|l| l.starts_with("# statisticsSemantics: whole-session-v3"))
+            {
+                let mut converted = format!("timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n# statisticsSemantics: {note}\n").into_bytes();
+                for line in payload.lines().skip(1) {
+                    if let Some(point) = parse_transition_measurement_line(line)? {
+                        write_stored_measurement(&mut converted, &point)?;
+                    }
+                }
+                crate::backend::atomic_write(&path, &converted)?;
+            }
+        }
+        write_summary_cache(&directory, &summarize(&session, &measurements))?;
+        session.format_version = SESSION_FORMAT_VERSION;
+        session.statistics_semantics = Some(note);
+        write_session_metadata(&directory, &session)?;
+        count += 1;
     }
-    fs::rename(temporary, destination)
-        .map_err(|error| format!("Kunne ikke færdiggøre sessionen: {error}"))
+    Ok(count)
 }
 
 fn recover_interrupted_sessions(root: &Path) -> Result<usize, String> {
@@ -798,8 +817,25 @@ fn read_measurements(directory: &Path) -> Result<Vec<StoredMeasurement>, String>
     Ok(measurements)
 }
 
+fn read_measurements_for_migration(directory: &Path) -> Result<Vec<StoredMeasurement>, String> {
+    let mut points = Vec::new();
+    visit_measurements(directory, parse_transition_measurement_line, |point| {
+        points.push(point);
+        Ok(())
+    })?;
+    Ok(points)
+}
+
 fn for_each_measurement(
     directory: &Path,
+    visit: impl FnMut(StoredMeasurement) -> Result<(), String>,
+) -> Result<(), String> {
+    visit_measurements(directory, parse_measurement_line, visit)
+}
+
+fn visit_measurements(
+    directory: &Path,
+    parse: fn(&str) -> Result<Option<StoredMeasurement>, String>,
     mut visit: impl FnMut(StoredMeasurement) -> Result<(), String>,
 ) -> Result<(), String> {
     let entries =
@@ -821,7 +857,7 @@ fn for_each_measurement(
             File::open(path).map_err(|error| format!("Kunne ikke læse målefilen: {error}"))?;
         for line in BufReader::new(file).lines().skip(1) {
             let line = line.map_err(|error| format!("Kunne ikke læse en måling: {error}"))?;
-            if let Some(measurement) = parse_measurement_line(&line)? {
+            if let Some(measurement) = parse(&line)? {
                 visit(measurement)?;
             }
         }
@@ -830,9 +866,23 @@ fn for_each_measurement(
 }
 
 fn parse_measurement_line(line: &str) -> Result<Option<StoredMeasurement>, String> {
+    if !line.starts_with("# statisticsSemantics:")
+        && !line.trim().is_empty()
+        && parse_csv_line(line)?.len() != 9
+    {
+        return Err("Målefilen skal migreres til version 3 før indlæsning.".into());
+    }
+    parse_transition_measurement_line(line)
+}
+
+// Only the one-time migration accepts the former six-column layout.
+fn parse_transition_measurement_line(line: &str) -> Result<Option<StoredMeasurement>, String> {
+    if line.starts_with("# statisticsSemantics:") || line.trim().is_empty() {
+        return Ok(None);
+    }
     let fields = parse_csv_line(line)?;
     if fields.len() != 6 && fields.len() != 9 {
-        return Ok(None);
+        return Err("Ugyldigt antal CSV-kolonner".into());
     }
     let timestamp = DateTime::parse_from_rfc3339(&fields[0])
         .map_err(|error| format!("Ugyldigt måletidspunkt: {error}"))?
@@ -840,7 +890,7 @@ fn parse_measurement_line(line: &str) -> Result<Option<StoredMeasurement>, Strin
     let level_db = fields[2]
         .parse()
         .map_err(|error| format!("Ugyldigt lydniveau: {error}"))?;
-    Ok(Some(match fields.len() {
+    let point = match fields.len() {
         6 => StoredMeasurement {
             timestamp,
             device_id: fields[1].clone(),
@@ -870,7 +920,16 @@ fn parse_measurement_line(line: &str) -> Result<Option<StoredMeasurement>, Strin
             raw: fields[8].clone(),
         },
         _ => unreachable!(),
-    }))
+    };
+    if !point.level_db.is_finite()
+        || !point.minimum_db.is_finite()
+        || !point.maximum_db.is_finite()
+        || point.sample_count == 0
+        || point.minimum_db > point.maximum_db
+    {
+        return Err("Ugyldig måling: niveau/range/sampleCount".into());
+    }
+    Ok(Some(point))
 }
 
 fn summary_for_session(directory: &Path, session: &Session) -> Result<SessionSummary, String> {
@@ -900,20 +959,8 @@ fn write_summary_cache(directory: &Path, summary: &SessionSummary) -> Result<(),
         cache_version: SUMMARY_CACHE_VERSION,
         summary: summary.clone(),
     })
-    .map_err(|error| format!("Kunne ikke serialisere sessionsoversigten: {error}"))?;
-    let temporary = directory.join(format!("{SUMMARY_CACHE_FILE}.tmp"));
-    let destination = directory.join(SUMMARY_CACHE_FILE);
-    let mut file = File::create(&temporary)
-        .map_err(|error| format!("Kunne ikke skrive sessionsoversigten: {error}"))?;
-    file.write_all(&payload)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("Kunne ikke synkronisere sessionsoversigten: {error}"))?;
-    if destination.exists() {
-        fs::remove_file(&destination)
-            .map_err(|error| format!("Kunne ikke opdatere sessionsoversigten: {error}"))?;
-    }
-    fs::rename(temporary, destination)
-        .map_err(|error| format!("Kunne ikke færdiggøre sessionsoversigten: {error}"))
+    .map_err(|e| e.to_string())?;
+    crate::backend::atomic_write(&directory.join(SUMMARY_CACHE_FILE), &payload)
 }
 
 fn summary_matches_session(summary: &SessionSummary, session: &Session) -> bool {
@@ -1075,6 +1122,120 @@ mod tests {
         }
     }
 
+    fn migration_fixture(
+        format: u32,
+        started: &str,
+        rows: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().into()).unwrap();
+        let mut session = store
+            .start(StartSessionRequest {
+                title: "Migration".into(),
+                event_type: "service".into(),
+                event_date: Local::now().date_naive(),
+                responsible_engineer_name: None,
+                devices: vec![],
+            })
+            .unwrap();
+        store.stop().unwrap();
+        let directory = super::session_directories(dir.path()).unwrap().remove(0);
+        session.format_version = format;
+        session.statistics_semantics = None;
+        session.started = chrono::DateTime::parse_from_rfc3339(started).unwrap();
+        session.ended = Some(session.started + Duration::seconds(3));
+        super::write_session_metadata(&directory, &session).unwrap();
+        fs::write(directory.join("measurements-test.csv"), rows).unwrap();
+        (dir, directory)
+    }
+
+    #[test]
+    fn migrates_raw_logs_and_is_byte_and_mtime_idempotent() {
+        let (root, directory) = migration_fixture(1, "2026-09-27T10:00:00+02:00",
+            "timestamp,deviceId,levelDb,weighting,response,raw\n2026-09-27T08:00:00Z,test,80,A,Fast,N:80\n2026-09-27T08:00:01Z,test,100,A,Fast,N:100\n2026-09-27T08:00:02Z,test,100,A,Fast,N:100\n");
+        let cutoff = chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+        assert_eq!(super::migrate_logs(root.path(), cutoff).unwrap(), 1);
+        let session = super::read_session_metadata(&directory).unwrap();
+        assert_eq!(session.format_version, 3);
+        assert!(session
+            .statistics_semantics
+            .as_ref()
+            .unwrap()
+            .contains("legacy-raw"));
+        let stats = super::summary_for_session(&directory, &session).unwrap();
+        assert_eq!(stats.minimum_db, Some(80.0));
+        assert_eq!(stats.maximum_db, Some(100.0));
+        assert_eq!(stats.red_zone_seconds, 1.5);
+        assert!((stats.leq_db.unwrap() - 98.7655).abs() < 0.001);
+        let files = ["session.json", "summary.json", "measurements-test.csv"];
+        let before: Vec<_> = files
+            .iter()
+            .map(|f| {
+                (
+                    fs::read(directory.join(f)).unwrap(),
+                    fs::metadata(directory.join(f)).unwrap().modified().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(super::migrate_logs(root.path(), cutoff).unwrap(), 0);
+        for (i, f) in files.iter().enumerate() {
+            assert_eq!(fs::read(directory.join(f)).unwrap(), before[i].0);
+            assert_eq!(
+                fs::metadata(directory.join(f)).unwrap().modified().unwrap(),
+                before[i].1
+            );
+        }
+    }
+
+    #[test]
+    fn migration_resumes_after_csv_write_and_marks_bucket_approximation() {
+        let (root, directory) = migration_fixture(2, "2026-08-01T10:00:00+02:00",
+            "timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n# statisticsSemantics: whole-session-v3; interrupted migration\n2026-08-01T08:00:00Z,test,85,70,99,10,A,Fast,N:90\n2026-08-01T08:00:01Z,test,95,82,102,5,A,Fast,N:95\n");
+        let csv = fs::read(directory.join("measurements-test.csv")).unwrap();
+        let cutoff = chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+        assert_eq!(super::migrate_logs(root.path(), cutoff).unwrap(), 1);
+        assert_eq!(
+            csv,
+            fs::read(directory.join("measurements-test.csv")).unwrap()
+        );
+        let session = super::read_session_metadata(&directory).unwrap();
+        assert!(session
+            .statistics_semantics
+            .as_ref()
+            .unwrap()
+            .contains("approximate"));
+        let stats = super::summary_for_session(&directory, &session).unwrap();
+        assert_eq!(stats.sample_count, 15);
+        assert_eq!(stats.minimum_db, Some(70.0));
+        assert_eq!(stats.maximum_db, Some(102.0));
+        assert_eq!(stats.red_zone_seconds, 0.5);
+    }
+
+    #[test]
+    fn cutoff_uses_copenhagen_date_and_corrupt_logs_are_not_overwritten() {
+        let cutoff = chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+        // UTC September 27, but already September 28 in Copenhagen.
+        let (root, directory) = migration_fixture(
+            1,
+            "2026-09-27T22:00:00Z",
+            "timestamp,deviceId,levelDb,weighting,response,raw\n",
+        );
+        let original = fs::read(directory.join("session.json")).unwrap();
+        assert_eq!(super::migrate_logs(root.path(), cutoff).unwrap(), 0);
+        assert_eq!(original, fs::read(directory.join("session.json")).unwrap());
+        let (root, directory) = migration_fixture(
+            1,
+            "2026-09-27T21:59:59Z",
+            "timestamp,deviceId,levelDb,weighting,response,raw\ninvalid,row\n",
+        );
+        let original = fs::read(directory.join("session.json")).unwrap();
+        assert!(super::migrate_logs(root.path(), cutoff).is_err());
+        assert_eq!(original, fs::read(directory.join("session.json")).unwrap());
+        assert!(!fs::read_to_string(directory.join("measurements-test.csv"))
+            .unwrap()
+            .contains("statisticsSemantics"));
+    }
+
     #[test]
     fn csv_round_trip_preserves_device_payload() {
         let value = "N:51.2, display says \"hold\"";
@@ -1224,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn stores_one_energy_bucket_per_second_with_range_and_raw_sample_count() {
+    fn stores_raw_samples_without_losing_intra_second_crossings() {
         let container = std::env::temp_dir().join(format!(
             "sound-monitor-buckets-{}",
             Utc::now().timestamp_nanos_opt().unwrap()
@@ -1248,12 +1409,12 @@ mod tests {
         store.stop().unwrap();
 
         let detail = store.load(&session.id).unwrap();
-        assert_eq!(detail.measurements.len(), 1);
+        assert_eq!(detail.measurements.len(), 2);
         let bucket = &detail.measurements[0];
-        assert!((bucket.level_db - 87.4).abs() < 0.1);
+        assert_eq!(bucket.level_db, 80.0);
         assert_eq!(bucket.minimum_db, 80.0);
-        assert_eq!(bucket.maximum_db, 90.0);
-        assert_eq!(bucket.sample_count, 2);
+        assert_eq!(bucket.maximum_db, 80.0);
+        assert_eq!(bucket.sample_count, 1);
 
         let summary = store.list(false).unwrap().remove(0);
         assert_eq!(summary.sample_count, 2);
@@ -1264,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_legacy_six_column_measurements() {
+    fn migration_alone_reads_six_column_measurements() {
         let directory = std::env::temp_dir().join(format!(
             "sound-monitor-legacy-csv-{}",
             Utc::now().timestamp_nanos_opt().unwrap()
@@ -1276,7 +1437,8 @@ mod tests {
         )
         .unwrap();
 
-        let measurements = read_measurements(&directory).unwrap();
+        assert!(read_measurements(&directory).is_err());
+        let measurements = super::read_measurements_for_migration(&directory).unwrap();
         assert_eq!(measurements.len(), 1);
         assert_eq!(measurements[0].level_db, 82.5);
         assert_eq!(measurements[0].minimum_db, 82.5);
@@ -1317,7 +1479,7 @@ mod tests {
         assert!(recovered.interrupted);
         assert_eq!(
             recovered.ended.unwrap().with_timezone(&Utc),
-            measurement_time
+            measurement_time + Duration::seconds(1)
         );
         assert!(recovered_store
             .finish_active_on_shutdown()

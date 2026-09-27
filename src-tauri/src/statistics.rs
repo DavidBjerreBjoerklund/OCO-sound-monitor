@@ -1,11 +1,13 @@
 use serde::Serialize;
+use std::collections::HashMap;
 
 use crate::storage::StoredMeasurement;
 
 const RED_ZONE_DB: f64 = 90.0;
 const COMPARISON_BIN_COUNT: usize = 24;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MeasurementStatistics {
     pub minimum_db: Option<f32>,
     pub maximum_db: Option<f32>,
@@ -42,90 +44,94 @@ pub struct ComparisonSeries {
     pub points: Vec<AggregatePoint>,
 }
 
+/// Session semantics v3: trapezoidal energy integration, linear dB crossings,
+/// per-device intervals up to 2 seconds. Device-time is summed, never connected
+/// across devices or missing intervals. No extrapolation beyond observed samples.
+#[derive(Default)]
+pub struct SessionAccumulator {
+    previous: HashMap<String, StoredMeasurement>,
+    statistics: MeasurementStatistics,
+    energy_ms: f64,
+    fallback_energy: f64,
+    pub sample_count: usize,
+}
+
+impl SessionAccumulator {
+    pub fn add(&mut self, point: &StoredMeasurement) {
+        if !point.level_db.is_finite()
+            || !point.minimum_db.is_finite()
+            || !point.maximum_db.is_finite()
+            || point.sample_count == 0
+        {
+            return;
+        }
+        let stats = &mut self.statistics;
+        stats.minimum_db = Some(
+            stats
+                .minimum_db
+                .map_or(point.minimum_db, |v| v.min(point.minimum_db)),
+        );
+        stats.maximum_db = Some(
+            stats
+                .maximum_db
+                .map_or(point.maximum_db, |v| v.max(point.maximum_db)),
+        );
+        self.sample_count += point.sample_count;
+        self.fallback_energy +=
+            10_f64.powf(point.level_db as f64 / 10.0) * point.sample_count as f64;
+        if let Some(previous) = self.previous.get(&point.device_id) {
+            let dt = (point.timestamp - previous.timestamp)
+                .num_microseconds()
+                .unwrap_or(0) as f64
+                / 1000.0;
+            if dt > 0.0 && dt <= 2000.0 {
+                stats.observed_seconds += dt / 1000.0;
+                stats.red_zone_seconds +=
+                    red_duration_ms(previous.level_db as f64, point.level_db as f64, dt) / 1000.0;
+                self.energy_ms += dt
+                    * (10_f64.powf(previous.level_db as f64 / 10.0)
+                        + 10_f64.powf(point.level_db as f64 / 10.0))
+                    / 2.0;
+            }
+            // Late samples can extend extrema but must not rewind the time cursor.
+            if point.timestamp <= previous.timestamp {
+                return;
+            }
+        }
+        self.previous.insert(point.device_id.clone(), point.clone());
+    }
+
+    pub fn snapshot(&self) -> MeasurementStatistics {
+        let mut result = self.statistics;
+        result.leq_db = if result.observed_seconds > 0.0 {
+            Some((10.0 * (self.energy_ms / (result.observed_seconds * 1000.0)).log10()) as f32)
+        } else if self.sample_count > 0 {
+            Some((10.0 * (self.fallback_energy / self.sample_count as f64).log10()) as f32)
+        } else {
+            None
+        };
+        result
+    }
+}
+
 pub fn calculate_statistics(measurements: &[StoredMeasurement]) -> MeasurementStatistics {
     let mut points: Vec<_> = measurements
         .iter()
-        .filter(|measurement| measurement.level_db.is_finite())
+        .filter(|p| p.level_db.is_finite())
         .collect();
-    points.sort_by_key(|measurement| measurement.timestamp);
-
-    if points.is_empty() {
-        return MeasurementStatistics::default();
+    points.sort_by_key(|p| p.timestamp);
+    let mut accumulator = SessionAccumulator::default();
+    for point in &points {
+        accumulator.add(point);
     }
-
-    let minimum_db = points
+    let mut result = accumulator.snapshot();
+    let levels: Vec<_> = points
         .iter()
-        .map(|measurement| measurement.minimum_db)
-        .reduce(f32::min);
-    let maximum_db = points
-        .iter()
-        .map(|measurement| measurement.maximum_db)
-        .reduce(f32::max);
-
-    if points.len() == 1 {
-        let level = points[0].level_db;
-        return MeasurementStatistics {
-            minimum_db,
-            maximum_db,
-            leq_db: Some(level),
-            typical_low_db: Some(level),
-            typical_high_db: Some(level),
-            ..MeasurementStatistics::default()
-        };
-    }
-
-    let maximum_gap_ms = continuity_limit_ms(&points);
-    let mut observed_ms = 0.0;
-    let mut red_ms = 0.0;
-    let mut energy_sum = 0.0;
-    let mut weighted_levels = Vec::with_capacity(points.len() * 2);
-
-    for pair in points.windows(2) {
-        let previous = pair[0];
-        let current = pair[1];
-        let interval_ms = (current.timestamp - previous.timestamp).num_milliseconds() as f64;
-        if interval_ms <= 0.0 || interval_ms > maximum_gap_ms {
-            continue;
-        }
-
-        let previous_level = previous.level_db as f64;
-        let current_level = current.level_db as f64;
-        observed_ms += interval_ms;
-        energy_sum += interval_ms
-            * (10_f64.powf(previous_level / 10.0) + 10_f64.powf(current_level / 10.0))
-            / 2.0;
-        weighted_levels.push((previous.level_db, interval_ms / 2.0));
-        weighted_levels.push((current.level_db, interval_ms / 2.0));
-        red_ms += red_duration_ms(previous_level, current_level, interval_ms);
-    }
-
-    let (leq_db, typical_low_db, typical_high_db) = if observed_ms > 0.0 {
-        (
-            Some((10.0 * (energy_sum / observed_ms).log10()) as f32),
-            weighted_quantile(&weighted_levels, 0.1),
-            weighted_quantile(&weighted_levels, 0.9),
-        )
-    } else {
-        let levels: Vec<_> = points
-            .iter()
-            .map(|measurement| measurement.level_db)
-            .collect();
-        (
-            energy_average(&levels),
-            unweighted_quantile(&levels, 0.1),
-            unweighted_quantile(&levels, 0.9),
-        )
-    };
-
-    MeasurementStatistics {
-        minimum_db,
-        maximum_db,
-        leq_db,
-        typical_low_db,
-        typical_high_db,
-        observed_seconds: observed_ms / 1_000.0,
-        red_zone_seconds: red_ms / 1_000.0,
-    }
+        .map(|p| (p.level_db, p.sample_count as f64))
+        .collect();
+    result.typical_low_db = weighted_quantile(&levels, 0.1);
+    result.typical_high_db = weighted_quantile(&levels, 0.9);
+    result
 }
 
 pub fn aggregate_sessions(sessions: &[Vec<StoredMeasurement>]) -> ComparisonSeries {
@@ -156,17 +162,6 @@ pub fn aggregate_sessions(sessions: &[Vec<StoredMeasurement>]) -> ComparisonSeri
         session_count: binned.len(),
         points,
     }
-}
-
-fn continuity_limit_ms(points: &[&StoredMeasurement]) -> f64 {
-    let mut deltas: Vec<_> = points
-        .windows(2)
-        .map(|pair| (pair[1].timestamp - pair[0].timestamp).num_milliseconds())
-        .filter(|delta| *delta > 0)
-        .collect();
-    deltas.sort_unstable();
-    let median = deltas.get(deltas.len() / 2).copied().unwrap_or(1_000) as f64;
-    (median * 5.0).clamp(2_000.0, 10_000.0)
 }
 
 fn red_duration_ms(previous: f64, current: f64, interval_ms: f64) -> f64 {
@@ -277,6 +272,70 @@ mod tests {
             response: None,
             raw: level_db.to_string(),
         }
+    }
+
+    #[test]
+    fn whole_session_outlives_chart_window_and_matches_streaming() {
+        let start = measurement(0, 80.0).timestamp;
+        let points: Vec<_> = (0..2000)
+            .map(|i| {
+                let mut point = measurement(
+                    0,
+                    if i == 0 {
+                        110.0
+                    } else if i < 1000 {
+                        95.0
+                    } else {
+                        70.0
+                    },
+                );
+                point.timestamp = start + chrono::Duration::milliseconds(i * 200);
+                point
+            })
+            .collect();
+        let mut accumulator = super::SessionAccumulator::default();
+        let mut previous_red = 0.0;
+        for point in &points {
+            accumulator.add(point);
+            assert!(accumulator.snapshot().red_zone_seconds >= previous_red);
+            previous_red = accumulator.snapshot().red_zone_seconds;
+        }
+        let live = accumulator.snapshot();
+        let saved = calculate_statistics(&points);
+        assert_eq!(live.minimum_db, Some(70.0));
+        assert_eq!(live.maximum_db, Some(110.0));
+        assert!(live.red_zone_seconds > 199.0);
+        assert!((live.observed_seconds - 399.8).abs() < 0.001);
+        assert_eq!(live.leq_db, saved.leq_db);
+        assert_eq!(live.red_zone_seconds, saved.red_zone_seconds);
+    }
+
+    #[test]
+    fn unequal_intervals_use_energy_and_time_not_db_average() {
+        let points = vec![
+            measurement(0, 80.0),
+            measurement(1, 100.0),
+            measurement(3, 100.0),
+        ];
+        let stats = calculate_statistics(&points);
+        let expected = 10.0 * (((1e8 + 1e10) / 2.0 + 2.0 * 1e10) / 3.0_f64).log10();
+        assert!((stats.leq_db.unwrap() as f64 - expected).abs() < 0.0001);
+        assert!((stats.red_zone_seconds - 2.5).abs() < 0.0001);
+    }
+
+    #[test]
+    fn devices_are_never_joined_and_empty_single_duplicate_points_are_defined() {
+        assert_eq!(calculate_statistics(&[]).leq_db, None);
+        let mut a = measurement(0, 80.0);
+        let mut b = measurement(1, 100.0);
+        b.device_id = "other".into();
+        let stats = calculate_statistics(&[a.clone(), b]);
+        assert_eq!(stats.red_zone_seconds, 0.0);
+        assert_eq!(stats.observed_seconds, 0.0);
+        a.level_db = 90.0;
+        assert_eq!(calculate_statistics(&[a.clone(), a]).observed_seconds, 0.0);
+        let stats = calculate_statistics(&[measurement(0, 90.0), measurement(1, 90.0)]);
+        assert_eq!(stats.red_zone_seconds, 1.0);
     }
 
     #[test]

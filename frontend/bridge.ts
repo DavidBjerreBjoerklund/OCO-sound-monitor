@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { previewStatistics } from "./previewStatistics";
 import { save } from "@tauri-apps/plugin-dialog";
 import type {
   DeviceDescriptor,
@@ -15,6 +16,7 @@ import type {
   TimeWeighting,
   ComparisonSeries,
   AppSettings,
+  LiveStatistics,
 } from "./types";
 
 interface ConnectOptions {
@@ -43,6 +45,8 @@ export async function getSettings(): Promise<AppSettings> {
     soundcheckStartTime: "09:30",
     serviceStartTime: "10:30",
     filePath: "Preview-hukommelse/Sessions/sound-monitor.ini",
+    iniContents: `[general]\nlanguage = ${language}\n[service]\nsoundcheck_start_time = 09:30\nstart_time = 10:30\n[classifications.${language}]\nservice = Service\nsoundcheck = Soundcheck\n[nextcloud]\n; base_url = https://cloud.example.org/remote.php/dav/files/user\n; remote_path = SoundMonitor\n; username = user\n; credential_reference = sound-monitor/nextcloud\n`,
+    nextcloud: { baseUrl: "", remotePath: "", username: "", credentialReference: "" },
     classifications: language === "da" ? [
       { id: "service", label: "Gudstjeneste" }, { id: "worship-night", label: "Lovsangsaften" },
       { id: "concert", label: "Koncert" }, { id: "conference", label: "Konference" },
@@ -83,7 +87,7 @@ function seedStatisticsPreview(): void {
       };
     });
     const session: Session = {
-      formatVersion: 2,
+      formatVersion: 3,
       id,
       title,
       eventType,
@@ -199,7 +203,7 @@ export async function startSession(request: StartSessionRequest): Promise<Sessio
   if (isDesktopRuntime()) return invoke<Session>("start_session", { request });
   const started = new Date().toISOString();
   const session: Session = {
-    formatVersion: 2, id: `preview-${Date.now()}`, title: request.title,
+    formatVersion: 3, id: `preview-${Date.now()}`, title: request.title,
     eventType: request.eventType, eventDate: request.eventDate, started, ended: null,
     interrupted: false,
     hidden: false,
@@ -228,26 +232,15 @@ export async function listSessions(includeHidden = false): Promise<SessionSummar
     const quantile = (position: number) => sorted.length
       ? sorted[Math.round((sorted.length - 1) * position)]
       : null;
-    const leqDb = levels.length
-      ? 10 * Math.log10(levels.reduce((sum, level) => sum + 10 ** (level / 10), 0) / levels.length)
-      : null;
-    const observedSeconds = measurements.length > 1
-      ? Math.max(0, (new Date(measurements.at(-1)!.timestamp).getTime() - new Date(measurements[0].timestamp).getTime()) / 1000)
-      : 0;
-    const redSamples = levels.filter((level) => level >= 90).length;
-    const redZonePercent = levels.length ? redSamples / levels.length * 100 : 0;
     return {
       id: session.id, title: session.title, eventType: session.eventType,
       eventDate: session.eventDate, started: session.started, ended: session.ended,
       interrupted: session.interrupted,
       hidden: session.hidden,
       responsibleEngineerName: session.responsibleEngineerName,
-      deviceCount: session.devices.length, sampleCount: measurements.length,
-      minimumDb: levels.length ? Math.min(...levels) : null,
-      maximumDb: levels.length ? Math.max(...levels) : null,
+      deviceCount: session.devices.length,
       averageDb: levels.length ? levels.reduce((sum, value) => sum + value, 0) / levels.length : null,
-      leqDb, typicalLowDb: quantile(0.1), typicalHighDb: quantile(0.9),
-      observedSeconds, redZoneSeconds: observedSeconds * redZonePercent / 100, redZonePercent,
+      ...previewStatistics(measurements), typicalLowDb: quantile(0.1), typicalHighDb: quantile(0.9),
       weightings: [...new Set(measurements.flatMap((measurement) => measurement.weighting ? [measurement.weighting] : []))],
       responses: [...new Set(measurements.flatMap((measurement) => measurement.response ? [measurement.response] : []))],
     };
@@ -284,7 +277,7 @@ export async function loadSession(id: string): Promise<SessionDetail> {
   if (isDesktopRuntime()) return invoke<SessionDetail>("load_session", { id });
   const detail = mockArchive.get(id);
   if (!detail) throw new Error("Sessionen blev ikke fundet.");
-  return detail;
+  return { ...detail, summary: (await listSessions(true)).find((s) => s.id === id) };
 }
 
 export async function libraryLocation(): Promise<string> {
@@ -353,4 +346,17 @@ export async function setSessionHidden(id: string, hidden: boolean): Promise<Ses
   if (!detail) throw new Error("Sessionen blev ikke fundet.");
   detail.session.hidden = hidden;
   return detail.session;
+}
+
+export async function getActiveStatistics(): Promise<LiveStatistics | null> {
+  if (isDesktopRuntime()) return invoke<LiveStatistics | null>("get_active_statistics");
+  if (!mockActive) return null;
+  return { ...previewStatistics(mockActive.measurements), sessionId: mockActive.session.id };
+}
+export async function saveSettings(contents: string): Promise<AppSettings> {
+  if (isDesktopRuntime()) return invoke<AppSettings>("save_settings", { contents });
+  throw new Error("Settings can only be saved in the desktop app.");
+}
+export async function openRecordingsFolder(): Promise<void> {
+  if (isDesktopRuntime()) await invoke("open_recordings_folder");
 }

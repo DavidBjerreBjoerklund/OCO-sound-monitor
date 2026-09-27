@@ -1674,3 +1674,20 @@ h2 {
     padding-bottom: 6px;
   }
 }
+
+.setup-dialog { width: min(760px, calc(100vw - 40px)); max-height: 90vh; overflow: auto; color: #edf2ee; background: #202622; border: 1px solid #48534a; border-radius: 16px; padding: 28px; box-shadow: 0 24px 90px #0009; }
+.setup-dialog::backdrop { background: #080e0bbd; backdrop-filter: blur(5px); }
+.setup-heading, .setup-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.setup-dialog h2 { margin: 6px 0; }
+.setup-dialog section { margin: 24px 0; }
+.setup-dialog h3 { font-size: 14px; margin: 0 0 10px; }
+.setup-dialog p { color: #aab7ae; font-size: 13px; line-height: 1.6; }
+.setup-path { display: block; overflow-wrap: anywhere; color: #9aac9e; font-size: 11px; margin: 10px 0; }
+.setup-dialog textarea { resize: vertical; width: 100%; box-sizing: border-box; background: #141b17; border: 1px solid #3c4b40; border-radius: 8px; color: #d3e4d8; padding: 14px; font: 12px/1.65 ui-monospace, monospace; }
+.setup-dialog textarea:focus { outline: 2px solid #79c95d; outline-offset: 2px; }
+.nextcloud-status { padding: 14px; background: #29322b; border-radius: 8px; }
+.setup-actions { justify-content: flex-end; }
+.setup-dialog .setup-error { color: #ff9788; }
+
+.setup-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 14px 0; }
+.setup-dialog summary { cursor: pointer; color: #c5d4c9; font-size: 13px; margin: 14px 0; }

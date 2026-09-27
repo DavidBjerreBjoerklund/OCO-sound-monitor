@@ -43,9 +43,10 @@ The LIVE workspace currently provides:
 - editable session title, event type, date, and responsible engineer,
 - template-based session suggestions implemented outside the UI.
 - crash-resistant, file-based session storage managed by Rust,
-- one energy-based storage bucket per device and second, preserving Leq,
-  minimum, maximum, and the original sample count,
-- append-only per-device CSV measurement files flushed in five-bucket batches,
+- raw timestamped samples in append-only per-device CSV files, flushed and synced
+  every five samples and when a session ends,
+- whole-session minimum, maximum, time-weighted energy Leq and cumulative red time,
+  independent of the rolling graph,
 - cached, rebuildable `summary.json` statistics for fast archive and filter loading,
 - JSON metadata with explicit A/C/D/Z and Fast/Slow settings,
 - searchable archive with session graph, statistics, devices, and engineer.
@@ -94,8 +95,9 @@ soundcheck = Soundcheck
 ```
 
 Classification identifiers use ASCII letters, digits, and hyphens, while labels
-may use normal UTF-8 text. Set `language` to `da` or `en`, then restart Sound
-Monitor. The interface, locale-aware date and number formatting, automatic service
+may use normal UTF-8 text. Use the Setup tab to edit and save settings, including
+`language` (`da` or `en`). Changes take effect immediately; new session suggestions
+use the saved schedule. The interface, locale-aware date and number formatting, automatic service
 title, marker presets, and classification labels follow the selected language.
 On Sundays, sessions started from `soundcheck_start_time` until the minute before
 `start_time` are suggested as soundchecks. Sessions started at `start_time` or
@@ -108,11 +110,56 @@ Complete data packages are written beside `Sessions` in the platform-specific
 `Exports` directory. Measurement and Statistics CSV exports use the native save
 dialog; bulk measurement exports are streamed to disk without loading all rows
 into memory.
-Legacy six-column measurement files remain readable. New files use the columns
-`timestamp`, `deviceId`, `levelDb`, `minimumDb`, `maximumDb`, `sampleCount`,
-`weighting`, `response`, and `raw`; `levelDb` is the energy-based Leq for that
-second and `raw` contains the final source line observed in the bucket. Sessions
-using this compact measurement format have `formatVersion: 2`.
+## Session statistics and storage (version 3)
+
+Version 3 is the only recording format after this update. `session.json` contains
+`formatVersion: 3` and `statisticsSemantics`; measurement CSVs carry a matching
+`# statisticsSemantics:` comment after the header. The columns are `timestamp`,
+`deviceId`, `levelDb`, `minimumDb`, `maximumDb`, `sampleCount`, `weighting`,
+`response`, `raw`. New recordings retain every raw sample (`sampleCount = 1`).
+
+Rust owns live, archive and exported session statistics. Leq is
+`10 log10(integral(10^(dB/10)) / observed time)`, integrating energy trapezoidally
+between successive samples from the same device. Time at or above 90 dB uses
+linear dB threshold crossings. Gaps over two seconds and non-positive intervals
+contribute no duration; there is no extrapolation before the first or after the
+last sample. Minimum and maximum include the entire recording. For multiple
+devices, observed/red duration is summed device-time and energy is weighted by
+that duration; it is not a union of wall-clock intervals or a sum of acoustic
+sources. With no continuous interval, Leq uses sample-count-weighted energy;
+empty sessions have no levels and zero duration. The one-minute live indicator
+and ten-second warning remain separate rolling indicators.
+
+At startup, unmarked recordings started on or before **2026-09-27 in
+Europe/Copenhagen** are migrated in place. CSVs and summary caches are written
+before the session's version marker, using synced temporary files and atomic
+replacement. A repeated migration leaves completed files unchanged and an
+interrupted migration can resume. Invalid measurements stop migration before
+that session is changed. Transition code alone reads the former layout.
+For recordings already reduced to buckets, original minima/maxima/counts are
+preserved; time integration uses the remaining bucket levels. Missing sample
+timing and intra-bucket red crossings cannot be recovered, so migrated records
+are explicitly marked as approximate. This is a one-time transition, not a
+compatibility commitment.
+
+## Setup and Nextcloud preparation
+
+Setup opens a modal with the recordings-folder action and validated, editable
+INI settings. Saving uses atomic replacement; invalid settings leave the file
+unchanged. Local storage remains the default and works without an account.
+
+`backend.rs` defines `StorageBackend` for reading/writing complete artifacts and
+`LocalStorage` provides atomic writes. Acquisition uses a local working copy;
+a future sync service can mirror its completed artifacts through a WebDAV
+implementation of this interface, without changing statistics or acquisition.
+The `[nextcloud]` settings are `base_url` (HTTPS), `remote_path`, `username`, and
+`credential_reference`. They configure preparation only, not an active backend.
+Passwords/tokens and credentials embedded in endpoint URLs are rejected.
+
+Still to implement: a platform-keychain `CredentialStore` (the current stub
+returns an explicit unavailable error), authenticated WebDAV adapter, discovery,
+upload/download, retries, conflict handling and sync scheduling/status. No
+network request or secret persistence is performed by this preparation.
 
 ## Driver CLI
 

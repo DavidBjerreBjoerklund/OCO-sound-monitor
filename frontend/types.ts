@@ -19,6 +19,8 @@ export interface AppSettings {
   serviceStartTime: string;
   classifications: Classification[];
   filePath: string;
+  iniContents: string;
+  nextcloud: { baseUrl: string; remotePath: string; username: string; credentialReference: string };
 }
 
 export interface DeviceDescriptor {
@@ -144,6 +146,7 @@ export interface SessionSummary {
 export interface SessionDetail {
   session: Session;
   measurements: Measurement[];
+  summary?: SessionSummary;
 }
 
 export interface ExportResult {
@@ -167,4 +170,13 @@ export interface AggregatePoint {
 export interface ComparisonSeries {
   sessionCount: number;
   points: AggregatePoint[];
+}
+
+export interface LiveStatistics {
+  sessionId: string;
+  sampleCount: number;
+  minimumDb: number | null;
+  maximumDb: number | null;
+  leqDb: number | null;
+  redZoneSeconds: number;
 }
