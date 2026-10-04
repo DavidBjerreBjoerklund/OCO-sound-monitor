@@ -110,13 +110,16 @@ Complete data packages are written beside `Sessions` in the platform-specific
 dialog; bulk measurement exports are streamed to disk without loading all rows
 into memory.
 
-## Session statistics and storage (version 3)
+## Session statistics and storage (version 4)
 
-Version 3 is the only recording format after this update. `session.json` contains
-`formatVersion: 3` and `statisticsSemantics`; measurement CSVs carry a matching
-`# statisticsSemantics:` comment after the header. The columns are `timestamp`,
-`deviceId`, `levelDb`, `minimumDb`, `maximumDb`, `sampleCount`, `weighting`,
-`response`, `raw`. New recordings retain every raw sample (`sampleCount = 1`).
+Version 4 is the current recording format. `session.json` stores
+`formatVersion`, `softwareVersion` (the version that recorded the session), and
+`migratedBySoftwareVersion` when a legacy recording has been converted.
+Measurement CSVs include a `softwareVersion` column on each sample as well as
+their format and statistics metadata. Older recordings keep their original
+software version as `unknown` when it cannot be recovered; the converter's
+version is recorded separately. New recordings retain every raw sample
+(`sampleCount = 1`).
 
 Rust owns live, archive and exported session statistics. Leq is
 `10 log10(integral(10^(dB/10)) / observed time)`, integrating energy trapezoidally
@@ -130,17 +133,15 @@ sources. With no continuous interval, Leq uses sample-count-weighted energy;
 empty sessions have no levels and zero duration. The one-minute live indicator
 and ten-second warning remain separate rolling indicators.
 
-At startup, unmarked recordings started on or before **2026-09-27 in
-Europe/Copenhagen** are migrated in place. CSVs and summary caches are written
-before the session's version marker, using synced temporary files and atomic
-replacement. A repeated migration leaves completed files unchanged and an
-interrupted migration can resume. Invalid measurements stop migration before
-that session is changed. Transition code alone reads the former layout.
-For recordings already reduced to buckets, original minima/maxima/counts are
-preserved; time integration uses the remaining bucket levels. Missing sample
-timing and intra-bucket red crossings cannot be recovered, so migrated records
-are explicitly marked as approximate. This is a one-time transition, not a
-compatibility commitment.
+At startup, all saved recordings that lack software-version metadata are
+migrated in place, regardless of their recording date. This includes the
+old six-column raw format and the previous nine-column format. CSV replacements
+are atomic and session metadata is updated last, so an interrupted migration
+can resume safely. Invalid measurement data prevents that session from being
+rewritten. For recordings already reduced to buckets, original
+minima/maxima/counts are preserved; time integration uses the remaining bucket
+levels. Missing sample timing and intra-bucket red crossings cannot be
+recovered, so those legacy statistics remain explicitly approximate.
 
 ## Setup and Nextcloud preparation
 

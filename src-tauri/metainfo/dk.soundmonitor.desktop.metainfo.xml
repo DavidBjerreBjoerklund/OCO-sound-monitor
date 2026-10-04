@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dk.soundmonitor.desktop</id>
+  <metadata_license>CC-BY-4.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Sound Monitor</name>
+  <summary>Monitor and record levels from Digital Sound 8922 meters</summary>
+  <summary xml:lang="da">Mål og optag lydniveauer fra Digital Sound 8922 lydmålere</summary>
+  <description>
+    <p>Sound Monitor reads measurements from Digital Sound 8922 sound level meters over a serial connection. It helps sound teams monitor levels during services, rehearsals, and other events.</p>
+    <ul>
+      <li>View live levels, peaks, and rolling Leq on a graph.</li>
+      <li>Record sessions with event details, notes, and time-stamped markers.</li>
+      <li>Browse the session archive, review statistics, and compare sessions.</li>
+      <li>Export measurements and session summaries as CSV files.</li>
+    </ul>
+  </description>
+  <description xml:lang="da">
+    <p>Sound Monitor modtager målinger fra lydmålere af typen Digital Sound 8922 via en seriel forbindelse. Programmet hjælper lydansvarlige med at følge lydniveauet ved gudstjenester, lydprøver og andre arrangementer.</p>
+    <ul>
+      <li>Se aktuelle lydniveauer, spidser og løbende Leq på en graf.</li>
+      <li>Optag sessioner med oplysninger om arrangementet, noter og tidsstemplede markører.</li>
+      <li>Gennemse sessionsarkivet, se statistik og sammenlign sessioner.</li>
+      <li>Eksportér målinger og sessionsoversigter som CSV-filer.</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">sound-monitor.desktop</launchable>
+  <icon type="stock">sound-monitor-desktop</icon>
+  <url type="homepage">https://github.com/DavidBjerreBjoerklund/sound-monitor</url>
+  <url type="bugtracker">https://github.com/DavidBjerreBjoerklund/sound-monitor/issues</url>
+  <url type="vcs-browser">https://github.com/DavidBjerreBjoerklund/sound-monitor</url>
+  <developer>
+    <name>DavidBjerreBjoerklund</name>
+  </developer>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>sound</keyword>
+    <keyword>noise</keyword>
+    <keyword>decibel</keyword>
+    <keyword>dB</keyword>
+    <keyword>measurement</keyword>
+  </keywords>
+  <keywords xml:lang="da">
+    <keyword>lyd</keyword>
+    <keyword>støj</keyword>
+    <keyword>decibel</keyword>
+    <keyword>måling</keyword>
+    <keyword>lydniveau</keyword>
+  </keywords>
+</component>

@@ -18,6 +18,10 @@ use crate::statistics::{
 const STORAGE_FLUSH_SAMPLES: usize = 5;
 const SUMMARY_CACHE_FILE: &str = "summary.json";
 const SUMMARY_CACHE_VERSION: u32 = 3;
+const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+const UNKNOWN_SOFTWARE_VERSION: &str = "unknown";
+const MEASUREMENT_CSV_HEADER: &[u8] =
+    b"timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw,softwareVersion\n";
 pub const STATISTICS_SEMANTICS: &str =
     "whole-session-v3: energy-time-integral; red>=90dB; per-device; gap<=2s";
 
@@ -78,6 +82,7 @@ pub struct StoredMeasurement {
     pub weighting: Option<FrequencyWeighting>,
     pub response: Option<TimeWeighting>,
     pub raw: String,
+    pub software_version: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,8 +127,8 @@ struct MeasurementWriter {
 }
 
 impl MeasurementWriter {
-    fn record(&mut self, measurement: &Measurement) -> Result<(), String> {
-        write_stored_measurement(&mut self.writer, &StoredMeasurement::from(measurement))?;
+    fn record(&mut self, measurement: &StoredMeasurement) -> Result<(), String> {
+        write_stored_measurement(&mut self.writer, measurement)?;
         self.samples_since_flush += 1;
         if self.samples_since_flush >= STORAGE_FLUSH_SAMPLES {
             self.flush()?;
@@ -152,6 +157,7 @@ impl From<&Measurement> for StoredMeasurement {
             weighting: m.weighting,
             response: m.response,
             raw: m.raw.clone(),
+            software_version: UNKNOWN_SOFTWARE_VERSION.to_owned(),
         }
     }
 }
@@ -175,7 +181,7 @@ impl SessionStore {
     pub fn new(root: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&root)
             .map_err(|error| format!("Kunne ikke oprette sessionsmappe: {error}"))?;
-        migrate_logs(&root, chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap())?;
+        migrate_logs(&root)?;
         recover_interrupted_sessions(&root)?;
         Ok(Self {
             root,
@@ -218,6 +224,8 @@ impl SessionStore {
         let session = Session {
             format_version: SESSION_FORMAT_VERSION,
             statistics_semantics: Some(format!("{STATISTICS_SEMANTICS}; source=raw")),
+            software_version: Some(SOFTWARE_VERSION.to_owned()),
+            migrated_by_software_version: None,
             id,
             title: request.title.trim().to_owned(),
             event_type: request.event_type,
@@ -289,6 +297,12 @@ impl SessionStore {
         let Some(active) = guard.as_mut() else {
             return Ok(());
         };
+        let mut stored = StoredMeasurement::from(measurement);
+        stored.software_version = active
+            .session
+            .software_version
+            .clone()
+            .unwrap_or_else(|| UNKNOWN_SOFTWARE_VERSION.to_owned());
         if !active.writers.contains_key(&measurement.device_id) {
             let filename = measurement_filename(&measurement.device_id);
             let path = active.directory.join(filename);
@@ -302,8 +316,28 @@ impl SessionStore {
             let mut writer = BufWriter::new(file);
             if is_empty {
                 writer
-                    .write_all(b"timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n# statisticsSemantics: whole-session-v3; source=raw-or-preserved-legacy; see session.json\n")
+                    .write_all(MEASUREMENT_CSV_HEADER)
                     .map_err(|error| format!("Kunne ikke skrive målefilens header: {error}"))?;
+                writeln!(writer, "# fileFormatVersion: {}", SESSION_FORMAT_VERSION)
+                    .and_then(|_| {
+                        writeln!(
+                            writer,
+                            "# softwareVersion: {}",
+                            active
+                                .session
+                                .software_version
+                                .as_deref()
+                                .unwrap_or(UNKNOWN_SOFTWARE_VERSION)
+                        )
+                    })
+                    .and_then(|_| {
+                        writeln!(
+                            writer,
+                            "# statisticsSemantics: {}; source=raw; see session.json",
+                            STATISTICS_SEMANTICS
+                        )
+                    })
+                    .map_err(|error| format!("Kunne ikke skrive målefilens metadata: {error}"))?;
             }
             active.writers.insert(
                 measurement.device_id.clone(),
@@ -317,8 +351,8 @@ impl SessionStore {
             .writers
             .get_mut(&measurement.device_id)
             .expect("writer was inserted");
-        writer.record(measurement)?;
-        active.statistics.add(&StoredMeasurement::from(measurement));
+        writer.record(&stored)?;
+        active.statistics.add(&stored);
         Ok(())
     }
 
@@ -417,7 +451,7 @@ impl SessionStore {
         let sessions = self.export_sessions(ids)?;
         let mut writer = csv_writer(path)?;
         writer
-            .write_all(b"sessionId,sessionTitle,eventDate,eventType,engineer,started,elapsedSeconds,timestamp,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,deviceId,raw\n")
+            .write_all(b"sessionId,sessionTitle,eventDate,eventType,engineer,started,elapsedSeconds,timestamp,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,deviceId,raw,softwareVersion\n")
             .map_err(|error| format!("Kunne ikke skrive CSV-headeren: {error}"))?;
         let mut row_count = 0;
 
@@ -431,7 +465,7 @@ impl SessionStore {
                     / 1_000.0;
                 writeln!(
                     writer,
-                    "{},{},{},{},{},{},{:.3},{},{},{},{},{},{},{},{},{}",
+                    "{},{},{},{},{},{},{:.3},{},{},{},{},{},{},{},{},{},{}",
                     csv_field(&session.id),
                     csv_field(&session.title),
                     session.event_date,
@@ -463,6 +497,7 @@ impl SessionStore {
                     ),
                     csv_field(&measurement.device_id),
                     csv_field(&measurement.raw),
+                    csv_field(&measurement.software_version),
                 )
                 .map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?;
                 row_count += 1;
@@ -487,7 +522,7 @@ impl SessionStore {
         let sessions = self.export_sessions(ids)?;
         let mut writer = csv_writer(path)?;
         writer
-            .write_all(b"sessionId,sessionTitle,eventDate,eventType,engineer,started,ended,durationSeconds,observedSeconds,sampleCount,deviceCount,minimumDb,leqDb,typicalLowDb,typicalHighDb,maximumDb,redZoneSeconds,redZonePercent,weightings,responses\n")
+            .write_all(b"sessionId,sessionTitle,eventDate,eventType,engineer,started,ended,durationSeconds,observedSeconds,sampleCount,deviceCount,minimumDb,leqDb,typicalLowDb,typicalHighDb,maximumDb,redZoneSeconds,redZonePercent,weightings,responses,softwareVersion\n")
             .map_err(|error| format!("Kunne ikke skrive CSV-headeren: {error}"))?;
 
         for (directory, session) in &sessions {
@@ -504,7 +539,7 @@ impl SessionStore {
                 .unwrap_or_default();
             writeln!(
                 writer,
-                "{},{},{},{},{},{},{},{:.3},{:.3},{},{},{},{},{},{},{},{:.3},{:.3},{},{}",
+                "{},{},{},{},{},{},{},{:.3},{:.3},{},{},{},{},{},{},{},{:.3},{:.3},{},{},{}",
                 csv_field(&summary.id),
                 csv_field(&summary.title),
                 summary.event_date,
@@ -535,6 +570,12 @@ impl SessionStore {
                 summary.red_zone_percent,
                 csv_field(&summary.weightings.join("|")),
                 csv_field(&summary.responses.join("|")),
+                csv_field(
+                    session
+                        .software_version
+                        .as_deref()
+                        .unwrap_or(UNKNOWN_SOFTWARE_VERSION)
+                ),
             )
             .map_err(|error| format!("Kunne ikke skrive statistikeksporten: {error}"))?;
         }
@@ -584,7 +625,15 @@ impl SessionStore {
 
         write_json_file(&directory.join("session.json"), &detail.session)?;
         write_measurement_export(&directory.join("measurements.csv"), &detail.measurements)?;
-        write_marker_export(&directory.join("markers.csv"), &detail.session.markers)?;
+        write_marker_export(
+            &directory.join("markers.csv"),
+            &detail.session.markers,
+            detail
+                .session
+                .software_version
+                .as_deref()
+                .unwrap_or(UNKNOWN_SOFTWARE_VERSION),
+        )?;
         Ok(ExportResult {
             directory: directory.display().to_string(),
             files: vec![
@@ -621,10 +670,18 @@ fn write_measurement_export(path: &Path, measurements: &[StoredMeasurement]) -> 
         File::create(path).map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?,
     );
     writer
-        .write_all(
-            b"timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n# statisticsSemantics: whole-session-v3; source=raw-or-preserved-legacy; see session.json\n",
-        )
+        .write_all(MEASUREMENT_CSV_HEADER)
         .map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?;
+    writeln!(writer, "# fileFormatVersion: {}", SESSION_FORMAT_VERSION)
+        .and_then(|_| writeln!(writer, "# exportedBySoftwareVersion: {}", SOFTWARE_VERSION))
+        .and_then(|_| {
+            writeln!(
+                writer,
+                "# statisticsSemantics: {}; source=raw-or-preserved-legacy; see session.json",
+                STATISTICS_SEMANTICS
+            )
+        })
+        .map_err(|error| format!("Kunne ikke skrive måleeksportens metadata: {error}"))?;
     for measurement in measurements {
         write_stored_measurement(&mut writer, measurement)
             .map_err(|error| format!("Kunne ikke skrive måleeksporten: {error}"))?;
@@ -640,7 +697,7 @@ fn write_stored_measurement(
 ) -> Result<(), String> {
     writeln!(
         writer,
-        "{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{}",
         csv_field(&measurement.timestamp.to_rfc3339()),
         csv_field(&measurement.device_id),
         measurement.level_db,
@@ -660,27 +717,33 @@ fn write_stored_measurement(
                 .unwrap_or_default()
         ),
         csv_field(&measurement.raw),
+        csv_field(&measurement.software_version),
     )
     .map_err(|error| format!("Kunne ikke gemme målingen: {error}"))
 }
 
-fn write_marker_export(path: &Path, markers: &[Marker]) -> Result<(), String> {
+fn write_marker_export(
+    path: &Path,
+    markers: &[Marker],
+    software_version: &str,
+) -> Result<(), String> {
     let mut writer = BufWriter::new(
         File::create(path)
             .map_err(|error| format!("Kunne ikke skrive markøreksporten: {error}"))?,
     );
     writer
-        .write_all(b"id,sessionId,timestamp,label,note\n")
+        .write_all(b"id,sessionId,timestamp,label,note,softwareVersion\n")
         .map_err(|error| format!("Kunne ikke skrive markøreksporten: {error}"))?;
     for marker in markers {
         writeln!(
             writer,
-            "{},{},{},{},{}",
+            "{},{},{},{},{},{}",
             csv_field(&marker.id),
             csv_field(&marker.session_id),
             csv_field(&marker.timestamp.to_rfc3339()),
             csv_field(&marker.label),
             csv_field(marker.note.as_deref().unwrap_or_default()),
+            csv_field(software_version),
         )
         .map_err(|error| format!("Kunne ikke skrive markøreksporten: {error}"))?;
     }
@@ -694,63 +757,110 @@ fn write_session_metadata(directory: &Path, session: &Session) -> Result<(), Str
     crate::backend::atomic_write(&directory.join("session.json"), &payload)
 }
 
-fn migrate_logs(root: &Path, cutoff: NaiveDate) -> Result<usize, String> {
+fn migrate_logs(root: &Path) -> Result<usize, String> {
     let mut count = 0;
     for directory in session_directories(root)? {
         let mut session = read_session_metadata(&directory)?;
-        // Fixed requested Copenhagen calendar cutoff; event dates are user-editable,
-        // so eligibility uses the recording start converted to Europe/Copenhagen.
-        let date = session
-            .started
-            .with_timezone(&chrono_tz::Europe::Copenhagen)
-            .date_naive();
-        if date > cutoff
-            || session
-                .statistics_semantics
-                .as_ref()
-                .is_some_and(|s| s.starts_with(STATISTICS_SEMANTICS))
-        {
+        let paths = measurement_csv_paths(&directory)?;
+        let needs_statistics_migration = !session
+            .statistics_semantics
+            .as_deref()
+            .is_some_and(|semantics| semantics.starts_with(STATISTICS_SEMANTICS));
+        let needs_csv_migration = paths
+            .iter()
+            .map(|path| measurement_csv_has_software_versions(path))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .any(|is_current| !is_current);
+        let needs_session_migration = session.format_version < SESSION_FORMAT_VERSION
+            || (session.software_version.is_none()
+                && session.migrated_by_software_version.is_none());
+
+        if !needs_statistics_migration && !needs_csv_migration && !needs_session_migration {
             continue;
         }
-        let measurements = read_measurements_for_migration(&directory)?; // Validate all data before writes.
-        let source = if session.format_version == 2 {
-            "legacy-buckets-approximate: intra-bucket timing and red crossings unavailable"
-        } else {
-            "legacy-raw"
+
+        let measurements = read_measurements_for_migration(&directory)?;
+
+        let source = match session.format_version {
+            1 => "legacy-raw",
+            2 => "legacy-buckets-approximate: intra-bucket timing and red crossings unavailable",
+            _ => "raw-or-preserved-legacy",
         };
-        let note = format!("{STATISTICS_SEMANTICS}; source={source}");
-        for entry in fs::read_dir(&directory).map_err(|e| e.to_string())? {
-            let path = entry.map_err(|e| e.to_string())?.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("csv")
-                || !path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .starts_with("measurements-")
-            {
+        let semantics = if needs_statistics_migration {
+            format!("{STATISTICS_SEMANTICS}; source={source}")
+        } else {
+            session
+                .statistics_semantics
+                .clone()
+                .unwrap_or_else(|| format!("{STATISTICS_SEMANTICS}; source={source}"))
+        };
+
+        // Validate every measurement before replacing any files. Atomic replacements
+        // make a partially completed migration safe to resume on the next launch.
+        for path in paths {
+            if measurement_csv_has_software_versions(&path)? {
                 continue;
             }
-            let payload = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            if !payload
-                .lines()
-                .any(|l| l.starts_with("# statisticsSemantics: whole-session-v3"))
-            {
-                let mut converted = format!("timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n# statisticsSemantics: {note}\n").into_bytes();
-                for line in payload.lines().skip(1) {
-                    if let Some(point) = parse_transition_measurement_line(line)? {
-                        write_stored_measurement(&mut converted, &point)?;
-                    }
+            let payload = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+            let mut converted = Vec::new();
+            converted.extend_from_slice(MEASUREMENT_CSV_HEADER);
+            writeln!(converted, "# fileFormatVersion: {SESSION_FORMAT_VERSION}")
+                .and_then(|_| writeln!(converted, "# softwareVersion: {UNKNOWN_SOFTWARE_VERSION}"))
+                .and_then(|_| {
+                    writeln!(converted, "# migratedBySoftwareVersion: {SOFTWARE_VERSION}")
+                })
+                .and_then(|_| writeln!(converted, "# statisticsSemantics: {semantics}"))
+                .map_err(|error| format!("Kunne ikke skrive målefilens metadata: {error}"))?;
+            for line in payload.lines().skip(1) {
+                if let Some(point) = parse_transition_measurement_line(line)? {
+                    write_stored_measurement(&mut converted, &point)?;
                 }
-                crate::backend::atomic_write(&path, &converted)?;
             }
+            crate::backend::atomic_write(&path, &converted)?;
         }
-        write_summary_cache(&directory, &summarize(&session, &measurements))?;
+
+        if needs_statistics_migration {
+            write_summary_cache(&directory, &summarize(&session, &measurements))?;
+            session.statistics_semantics = Some(semantics);
+        }
         session.format_version = SESSION_FORMAT_VERSION;
-        session.statistics_semantics = Some(note);
+        if session.software_version.is_none() {
+            session.software_version = Some(UNKNOWN_SOFTWARE_VERSION.to_owned());
+        }
+        session.migrated_by_software_version = Some(SOFTWARE_VERSION.to_owned());
         write_session_metadata(&directory, &session)?;
         count += 1;
     }
     Ok(count)
+}
+
+fn measurement_csv_paths(directory: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("csv")
+            && path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.starts_with("measurements-"))
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn measurement_csv_has_software_versions(path: &Path) -> Result<bool, String> {
+    let expected_header = std::str::from_utf8(MEASUREMENT_CSV_HEADER)
+        .expect("static measurement CSV header is UTF-8")
+        .trim_end();
+    let mut header = String::new();
+    BufReader::new(File::open(path).map_err(|error| error.to_string())?)
+        .read_line(&mut header)
+        .map_err(|error| error.to_string())?;
+    Ok(header.trim_end() == expected_header)
 }
 
 fn recover_interrupted_sessions(root: &Path) -> Result<usize, String> {
@@ -866,22 +976,22 @@ fn visit_measurements(
 }
 
 fn parse_measurement_line(line: &str) -> Result<Option<StoredMeasurement>, String> {
-    if !line.starts_with("# statisticsSemantics:")
-        && !line.trim().is_empty()
-        && parse_csv_line(line)?.len() != 9
-    {
-        return Err("Målefilen skal migreres til version 3 før indlæsning.".into());
+    if line.trim().is_empty() || line.starts_with('#') {
+        return Ok(None);
+    }
+    if parse_csv_line(line)?.len() != 10 {
+        return Err("Målefilen skal migreres til version 4 før indlæsning.".into());
     }
     parse_transition_measurement_line(line)
 }
 
-// Only the one-time migration accepts the former six-column layout.
+// Startup migration accepts every previously released measurement layout.
 fn parse_transition_measurement_line(line: &str) -> Result<Option<StoredMeasurement>, String> {
-    if line.starts_with("# statisticsSemantics:") || line.trim().is_empty() {
+    if line.starts_with('#') || line.trim().is_empty() {
         return Ok(None);
     }
     let fields = parse_csv_line(line)?;
-    if fields.len() != 6 && fields.len() != 9 {
+    if fields.len() != 6 && fields.len() != 9 && fields.len() != 10 {
         return Err("Ugyldigt antal CSV-kolonner".into());
     }
     let timestamp = DateTime::parse_from_rfc3339(&fields[0])
@@ -901,6 +1011,7 @@ fn parse_transition_measurement_line(line: &str) -> Result<Option<StoredMeasurem
             weighting: parse_optional(&fields[3])?,
             response: parse_optional(&fields[4])?,
             raw: fields[5].clone(),
+            software_version: UNKNOWN_SOFTWARE_VERSION.to_owned(),
         },
         9 => StoredMeasurement {
             timestamp,
@@ -918,6 +1029,29 @@ fn parse_transition_measurement_line(line: &str) -> Result<Option<StoredMeasurem
             weighting: parse_optional(&fields[6])?,
             response: parse_optional(&fields[7])?,
             raw: fields[8].clone(),
+            software_version: UNKNOWN_SOFTWARE_VERSION.to_owned(),
+        },
+        10 => StoredMeasurement {
+            timestamp,
+            device_id: fields[1].clone(),
+            level_db,
+            minimum_db: fields[3]
+                .parse()
+                .map_err(|error| format!("Ugyldigt minimumsniveau: {error}"))?,
+            maximum_db: fields[4]
+                .parse()
+                .map_err(|error| format!("Ugyldigt maksimumsniveau: {error}"))?,
+            sample_count: fields[5]
+                .parse()
+                .map_err(|error| format!("Ugyldigt antal samples: {error}"))?,
+            weighting: parse_optional(&fields[6])?,
+            response: parse_optional(&fields[7])?,
+            raw: fields[8].clone(),
+            software_version: if fields[9].is_empty() {
+                UNKNOWN_SOFTWARE_VERSION.to_owned()
+            } else {
+                fields[9].clone()
+            },
         },
         _ => unreachable!(),
     };
@@ -1142,6 +1276,8 @@ mod tests {
         let directory = super::session_directories(dir.path()).unwrap().remove(0);
         session.format_version = format;
         session.statistics_semantics = None;
+        session.software_version = None;
+        session.migrated_by_software_version = None;
         session.started = chrono::DateTime::parse_from_rfc3339(started).unwrap();
         session.ended = Some(session.started + Duration::seconds(3));
         super::write_session_metadata(&directory, &session).unwrap();
@@ -1153,10 +1289,14 @@ mod tests {
     fn migrates_raw_logs_and_is_byte_and_mtime_idempotent() {
         let (root, directory) = migration_fixture(1, "2026-09-27T10:00:00+02:00",
             "timestamp,deviceId,levelDb,weighting,response,raw\n2026-09-27T08:00:00Z,test,80,A,Fast,N:80\n2026-09-27T08:00:01Z,test,100,A,Fast,N:100\n2026-09-27T08:00:02Z,test,100,A,Fast,N:100\n");
-        let cutoff = chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
-        assert_eq!(super::migrate_logs(root.path(), cutoff).unwrap(), 1);
+        assert_eq!(super::migrate_logs(root.path()).unwrap(), 1);
         let session = super::read_session_metadata(&directory).unwrap();
-        assert_eq!(session.format_version, 3);
+        assert_eq!(session.format_version, 4);
+        assert_eq!(
+            session.software_version.as_deref(),
+            Some(super::UNKNOWN_SOFTWARE_VERSION)
+        );
+        assert!(session.migrated_by_software_version.is_some());
         assert!(session
             .statistics_semantics
             .as_ref()
@@ -1177,7 +1317,7 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(super::migrate_logs(root.path(), cutoff).unwrap(), 0);
+        assert_eq!(super::migrate_logs(root.path()).unwrap(), 0);
         for (i, f) in files.iter().enumerate() {
             assert_eq!(fs::read(directory.join(f)).unwrap(), before[i].0);
             assert_eq!(
@@ -1192,12 +1332,15 @@ mod tests {
         let (root, directory) = migration_fixture(2, "2026-08-01T10:00:00+02:00",
             "timestamp,deviceId,levelDb,minimumDb,maximumDb,sampleCount,weighting,response,raw\n# statisticsSemantics: whole-session-v3; interrupted migration\n2026-08-01T08:00:00Z,test,85,70,99,10,A,Fast,N:90\n2026-08-01T08:00:01Z,test,95,82,102,5,A,Fast,N:95\n");
         let csv = fs::read(directory.join("measurements-test.csv")).unwrap();
-        let cutoff = chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
-        assert_eq!(super::migrate_logs(root.path(), cutoff).unwrap(), 1);
-        assert_eq!(
-            csv,
-            fs::read(directory.join("measurements-test.csv")).unwrap()
-        );
+        assert_eq!(super::migrate_logs(root.path()).unwrap(), 1);
+        let converted = fs::read_to_string(directory.join("measurements-test.csv")).unwrap();
+        assert_ne!(csv, converted.as_bytes());
+        assert!(converted.contains(",raw,softwareVersion\n"));
+        assert!(converted.contains(&format!(
+            "# migratedBySoftwareVersion: {}\n",
+            super::SOFTWARE_VERSION
+        )));
+        assert!(converted.contains(",unknown\n"));
         let session = super::read_session_metadata(&directory).unwrap();
         assert!(session
             .statistics_semantics
@@ -1212,24 +1355,29 @@ mod tests {
     }
 
     #[test]
-    fn cutoff_uses_copenhagen_date_and_corrupt_logs_are_not_overwritten() {
-        let cutoff = chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
-        // UTC September 27, but already September 28 in Copenhagen.
+    fn migration_converts_all_dates_and_corrupt_logs_are_not_overwritten() {
+        // UTC September 27, but already September 28 in Copenhagen. The migration
+        // is no longer limited to a date cutoff.
         let (root, directory) = migration_fixture(
             1,
             "2026-09-27T22:00:00Z",
             "timestamp,deviceId,levelDb,weighting,response,raw\n",
         );
-        let original = fs::read(directory.join("session.json")).unwrap();
-        assert_eq!(super::migrate_logs(root.path(), cutoff).unwrap(), 0);
-        assert_eq!(original, fs::read(directory.join("session.json")).unwrap());
+        assert_eq!(super::migrate_logs(root.path()).unwrap(), 1);
+        let converted_session = super::read_session_metadata(&directory).unwrap();
+        assert_eq!(converted_session.format_version, 4);
+        let converted_csv = fs::read_to_string(directory.join("measurements-test.csv")).unwrap();
+        assert!(converted_csv.contains(&format!(
+            "# migratedBySoftwareVersion: {}\n",
+            super::SOFTWARE_VERSION
+        )));
         let (root, directory) = migration_fixture(
             1,
             "2026-09-27T21:59:59Z",
             "timestamp,deviceId,levelDb,weighting,response,raw\ninvalid,row\n",
         );
         let original = fs::read(directory.join("session.json")).unwrap();
-        assert!(super::migrate_logs(root.path(), cutoff).is_err());
+        assert!(super::migrate_logs(root.path()).is_err());
         assert_eq!(original, fs::read(directory.join("session.json")).unwrap());
         assert!(!fs::read_to_string(directory.join("measurements-test.csv"))
             .unwrap()

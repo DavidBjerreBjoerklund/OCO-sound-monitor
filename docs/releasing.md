@@ -19,7 +19,7 @@ source private.
 Keep the application version in sync in `package.json`, `package-lock.json`,
 `Cargo.toml`, `src-tauri/Cargo.toml`, `Cargo.lock`, and
 `src-tauri/tauri.conf.json`. For an alpha release, use a tag such as
-`v0.2.0-alpha.2`; the release workflow marks tags containing `-` as
+`v0.2.0-alpha.3`; the release workflow marks tags containing `-` as
 pre-releases.
 
 ## Build workflows
@@ -31,6 +31,10 @@ Manual platform builds are available in:
 - `.github/workflows/build-macos.yml` — macOS DMGs for Apple Silicon (arm64)
   and Intel (x64).
 
+The AppStream metadata is maintained in
+`src-tauri/metainfo/dk.soundmonitor.desktop.metainfo.xml` and is bundled into
+Linux RPM and DEB packages under `/usr/share/metainfo/`.
+
 Start a manual build from the repository's **Actions** tab. The build files are
 saved as workflow artifacts.
 
@@ -39,7 +43,7 @@ saved as workflow artifacts.
 `.github/workflows/release.yml` builds all supported installers when a tag
 matching `v*` is pushed. It publishes the GitHub Release only after every
 platform build succeeds. It adds Fedora and Windows installers plus both macOS
-DMGs. Tags containing a hyphen, such as `v0.2.0-alpha.2`, are marked as
+DMGs. Tags containing a hyphen, such as `v0.2.0-alpha.3`, are marked as
 pre-releases.
 
 The publish job uses the workflow's `GITHUB_TOKEN`, with `contents: write` for

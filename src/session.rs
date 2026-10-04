@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::measurement::{FrequencyWeighting, TimeWeighting};
 use crate::person::CrewMember;
 
-pub const SESSION_FORMAT_VERSION: u32 = 3;
+pub const SESSION_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +36,10 @@ pub struct Session {
     pub format_version: u32,
     #[serde(default)]
     pub statistics_semantics: Option<String>,
+    #[serde(default)]
+    pub software_version: Option<String>,
+    #[serde(default)]
+    pub migrated_by_software_version: Option<String>,
     pub id: String,
     pub title: String,
     pub event_type: String,

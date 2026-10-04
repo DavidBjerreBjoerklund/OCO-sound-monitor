@@ -271,6 +271,7 @@ mod tests {
             weighting: None,
             response: None,
             raw: level_db.to_string(),
+            software_version: env!("CARGO_PKG_VERSION").to_owned(),
         }
     }
 

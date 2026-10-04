@@ -87,7 +87,9 @@ function seedStatisticsPreview(): void {
       };
     });
     const session: Session = {
-      formatVersion: 3,
+      formatVersion: 4,
+      softwareVersion: "preview",
+      migratedBySoftwareVersion: null,
       id,
       title,
       eventType,
@@ -203,7 +205,8 @@ export async function startSession(request: StartSessionRequest): Promise<Sessio
   if (isDesktopRuntime()) return invoke<Session>("start_session", { request });
   const started = new Date().toISOString();
   const session: Session = {
-    formatVersion: 3, id: `preview-${Date.now()}`, title: request.title,
+    formatVersion: 4, softwareVersion: "preview", migratedBySoftwareVersion: null,
+    id: `preview-${Date.now()}`, title: request.title,
     eventType: request.eventType, eventDate: request.eventDate, started, ended: null,
     interrupted: false,
     hidden: false,

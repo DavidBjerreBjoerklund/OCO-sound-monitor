@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Sound Monitor",
-  "version": "0.2.0-alpha.2",
+  "version": "0.2.0-alpha.3",
   "identifier": "dk.soundmonitor.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -29,6 +29,18 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/share/metainfo/dk.soundmonitor.desktop.metainfo.xml": "metainfo/dk.soundmonitor.desktop.metainfo.xml"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/metainfo/dk.soundmonitor.desktop.metainfo.xml": "metainfo/dk.soundmonitor.desktop.metainfo.xml"
+        }
+      }
+    },
     "resources": {
       "../sound-monitor.ini": "sound-monitor.ini",
       "../LICENSE": "LICENSE",

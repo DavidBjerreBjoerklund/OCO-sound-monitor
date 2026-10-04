@@ -41,6 +41,7 @@ export interface Measurement {
   weighting: FrequencyWeighting | null;
   response: TimeWeighting | null;
   raw: string;
+  softwareVersion?: string;
 }
 
 export type DeviceEvent =
@@ -86,6 +87,8 @@ export interface SessionDevice {
 
 export interface Session {
   formatVersion: number;
+  softwareVersion: string | null;
+  migratedBySoftwareVersion: string | null;
   id: string;
   title: string;
   eventType: string;

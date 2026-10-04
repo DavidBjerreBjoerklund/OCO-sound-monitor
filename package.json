@@ -1,7 +1,7 @@
 {
   "name": "sound-monitor-ui",
   "private": true,
-  "version": "0.2.0-alpha.2",
+  "version": "0.2.0-alpha.3",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
