@@ -1717,4 +1717,9 @@ h2 {
 .setup-dialog .setup-error { color: #ff9788; }
 
 .setup-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 14px 0; }
+.setup-automation { display: grid; gap: 10px; margin: 18px 0; padding: 14px; background: #29322b; border-radius: 8px; }
+.setup-automation .field-label { color: #aab7ae; font-size: 12px; font-weight: 650; }
+.setup-automation p { margin: 0; }
+.setup-toggle { display: flex; align-items: flex-start; gap: 10px; color: #dce5dd; font-size: 13px; line-height: 1.45; cursor: pointer; }
+.setup-toggle input { width: 16px; height: 16px; margin: 1px 0 0; accent-color: #79c95d; flex: 0 0 auto; }
 .setup-dialog summary { cursor: pointer; color: #c5d4c9; font-size: 13px; margin: 14px 0; }

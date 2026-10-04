@@ -44,8 +44,10 @@ export async function getSettings(): Promise<AppSettings> {
     language,
     soundcheckStartTime: "09:30",
     serviceStartTime: "10:30",
+    autoStartEnabled: true,
+    autoSplitEnabled: true,
     filePath: "Preview-hukommelse/Sessions/sound-monitor.ini",
-    iniContents: `[general]\nlanguage = ${language}\n[service]\nsoundcheck_start_time = 09:30\nstart_time = 10:30\n[classifications.${language}]\nservice = Service\nsoundcheck = Soundcheck\n[nextcloud]\n; base_url = https://cloud.example.org/remote.php/dav/files/user\n; remote_path = SoundMonitor\n; username = user\n; credential_reference = sound-monitor/nextcloud\n`,
+    iniContents: `[general]\nlanguage = ${language}\n[service]\nsoundcheck_start_time = 09:30\nstart_time = 10:30\nauto_start_enabled = true\nauto_split_enabled = true\n[classifications.${language}]\nservice = ${language === "da" ? "Gudstjeneste" : "Service"}\nsoundcheck = ${language === "da" ? "Lydprøve" : "Soundcheck"}\n[nextcloud]\n; base_url = https://cloud.example.org/remote.php/dav/files/user\n; remote_path = SoundMonitor\n; username = user\n; credential_reference = sound-monitor/nextcloud\n`,
     nextcloud: { baseUrl: "", remotePath: "", username: "", credentialReference: "" },
     classifications: language === "da" ? [
       { id: "service", label: "Gudstjeneste" }, { id: "worship-night", label: "Lovsangsaften" },

@@ -83,6 +83,8 @@ language = da
 [service]
 soundcheck_start_time = 09:30
 start_time = 10:30
+auto_start_enabled = true
+auto_split_enabled = true
 
 [classifications.da]
 service = Gudstjeneste
@@ -102,6 +104,10 @@ On Sundays, sessions started from `soundcheck_start_time` until the minute befor
 `start_time` are suggested as soundchecks. Sessions started at `start_time` or
 later in the service window are suggested as services. Existing INI files without
 `soundcheck_start_time` use one hour before `start_time`.
+At the configured Sunday `start_time`, `auto_start_enabled` starts a service session
+when none is recording, and `auto_split_enabled` ends an active session and starts
+a new service session. Both options can be changed in Setup. Service titles default
+to the localized classification followed by the event date.
 Existing sessions retain their stable stored classification ID if its INI entry is
 later removed. Legacy files with a single `[classifications]` section remain valid
 and default to Danish.

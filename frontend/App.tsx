@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   Activity, Archive, Cable, CalendarDays, Check, Circle, Clock3, Download, Eye, EyeOff,
   ChartNoAxesCombined, Flag, FolderOpen, Gauge, HardDrive, Package, Plus, Plug, RefreshCw, Search, Square,
@@ -25,6 +25,12 @@ import { recentMaximum, rollingLeq } from "./liveMetrics";
 
 const MAX_CHART_POINTS = 540;
 const RED_ZONE_DB = 90;
+const SERVICE_WINDOW_MINUTES = 90;
+
+function localDateValue(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 function formatClock(date: Date, language: Language): string {
   return new Intl.DateTimeFormat(localeFor(language), { weekday: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(date);
 }
@@ -35,6 +41,21 @@ function formatChartTime(timestamp: string, language: Language): string {
 
 function formatDate(value: string, language: Language): string {
   return new Intl.DateTimeFormat(localeFor(language), { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T12:00:00`));
+}
+
+function serviceSessionTitle(eventDate: string, settings: AppSettings, language: Language): string {
+  const classification = settings.classifications.find((item) => item.id === "service")?.label
+    ?? (language === "da" ? "Gudstjeneste" : "Service");
+  return `${classification} ${formatDate(eventDate, language)}`;
+}
+
+function inSundayServiceWindow(now: Date, serviceStartTime: string): boolean {
+  if (now.getDay() !== 0) return false;
+  const [hours, minutes] = serviceStartTime.split(":").map(Number);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return false;
+  const currentMinute = now.getHours() * 60 + now.getMinutes();
+  const sinceStart = (currentMinute - (hours * 60 + minutes) + 24 * 60) % (24 * 60);
+  return sinceStart < SERVICE_WINDOW_MINUTES;
 }
 
 function exportFilename(value: string): string {
@@ -143,9 +164,10 @@ function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [title, setTitle] = useState("");
   const [eventType, setEventType] = useState("service");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(localDateValue(new Date()));
   const [engineer, setEngineer] = useState("");
   const [activeSession, setActiveSession] = useState<Session | null>(null);
+  const automatedServiceDate = useRef<string | null>(null);
   const [archive, setArchive] = useState<SessionSummary[]>([]);
   const [archiveSearch, setArchiveSearch] = useState("");
   const [showHidden, setShowHidden] = useState(false);
@@ -177,14 +199,21 @@ function App() {
 
   useEffect(() => {
     void refreshDevices();
-    void getSettings().then((loadedSettings) => {
+    void getSettings().then(async (loadedSettings) => {
       setSettings(loadedSettings);
       document.documentElement.lang = loadedSettings.language;
       setMarkerLabel((current) => current || translate(loadedSettings.language, "worshipStarts"));
-    }).catch((reason) => setError(String(reason)));
-    void suggestSession().then((suggestion) => {
-      setTitle(suggestion.draft.title ?? ""); setEventType(suggestion.draft.eventType ?? "service");
-      setDate(suggestion.draft.date ?? new Date().toISOString().slice(0, 10));
+      const suggestion = await suggestSession();
+      const suggestedDate = suggestion.draft.date ?? localDateValue(new Date());
+      const suggestedEventType = suggestion.draft.eventType ?? "service";
+      const suggestedTitle = suggestion.draft.title ?? "";
+      const sundayService = suggestedEventType === "service"
+        && suggestion.matchedTemplateIds.includes("sunday-service");
+      setTitle(sundayService && suggestedTitle.trim()
+        ? `${suggestedTitle} ${formatDate(suggestedDate, loadedSettings.language)}`
+        : suggestedTitle);
+      setEventType(suggestedEventType);
+      setDate(suggestedDate);
     }).catch((reason) => setError(String(reason)));
     void libraryLocation().then(setArchivePath).catch(() => undefined);
     const timer = window.setInterval(() => setClock(new Date()), 1000);
@@ -248,14 +277,79 @@ function App() {
         await refreshArchive(); return;
       }
       const descriptor = devices.find((device) => device.serialPort === selectedPort);
+      const now = new Date();
+      const sessionTitle = title.trim() || (settings && eventType === "service"
+        && inSundayServiceWindow(now, settings.serviceStartTime)
+        ? serviceSessionTitle(date || localDateValue(now), settings, language)
+        : translate(language, "defaultUntitled"));
       const session = await startSession({
-        title: title.trim() || translate(language, "defaultUntitled"), eventType, eventDate: date,
+        title: sessionTitle, eventType, eventDate: date,
         responsibleEngineerName: engineer.trim() || null,
         devices: activeDeviceId && descriptor ? [{ id: activeDeviceId, name: descriptor.name, driver: descriptor.driver, serialPort: descriptor.serialPort, location: descriptor.location, weighting, response }] : [],
       });
+      setTitle(sessionTitle);
       setSessionStatistics(null); setMeasurements([]); setActiveSession(session);
     } catch (reason) { setError(String(reason)); }
   };
+
+  useEffect(() => {
+    if (!settings || clock.getDay() !== 0) return;
+    const [serviceHour, serviceMinute] = settings.serviceStartTime.split(":").map(Number);
+    if (clock.getHours() !== serviceHour || clock.getMinutes() !== serviceMinute) return;
+
+    const today = localDateValue(clock);
+    if (automatedServiceDate.current === today) return;
+    const automationKey = `sound-monitor:service-automation:${today}`;
+    try {
+      if (window.localStorage.getItem(automationKey) === "done") {
+        automatedServiceDate.current = today;
+        return;
+      }
+    } catch { /* The in-memory guard still prevents duplicate actions in this run. */ }
+
+    const scheduledStart = new Date(clock.getFullYear(), clock.getMonth(), clock.getDate(), serviceHour, serviceMinute).getTime();
+    const shouldSplit = !!activeSession && settings.autoSplitEnabled
+      && new Date(activeSession.started).getTime() < scheduledStart;
+    const shouldStart = !activeSession && settings.autoStartEnabled;
+    if (!shouldSplit && !shouldStart) return;
+
+    automatedServiceDate.current = today;
+    try { window.localStorage.setItem(automationKey, "done"); } catch { /* In-memory guard remains active. */ }
+
+    void (async () => {
+      try {
+        setError(null);
+        if (shouldSplit) {
+          await stopSession();
+          setActiveSession(null);
+          await refreshArchive();
+        }
+
+        const descriptor = devices.find((device) => device.serialPort === selectedPort);
+        const generatedTitle = serviceSessionTitle(today, settings, language);
+        const suggestionLabels = new Set(settings.classifications.map((item) => item.label));
+        const titleWasSuggested = suggestionLabels.has(title.trim());
+        const nextTitle = shouldSplit || !title.trim() || titleWasSuggested ? generatedTitle : title.trim();
+        const session = await startSession({
+          title: nextTitle,
+          eventType: "service",
+          eventDate: today,
+          responsibleEngineerName: engineer.trim() || null,
+          devices: activeDeviceId && descriptor ? [{ id: activeDeviceId, name: descriptor.name, driver: descriptor.driver, serialPort: descriptor.serialPort, location: descriptor.location, weighting, response }] : [],
+        });
+        setTitle(nextTitle);
+        setEventType("service");
+        setDate(today);
+        setSessionStatistics(null);
+        setMeasurements([]);
+        setActiveSession(session);
+        setMode("live");
+        setNotice(translate(language, shouldSplit ? "automaticServiceSplit" : "automaticServiceStart"));
+      } catch (reason) {
+        setError(String(reason));
+      }
+    })();
+  }, [activeDeviceId, activeSession, clock, date, devices, engineer, language, refreshArchive, response, selectedPort, settings, title, weighting]);
 
   const openArchive = async () => {
     setMode("archive"); await refreshArchive(!selectedSession);

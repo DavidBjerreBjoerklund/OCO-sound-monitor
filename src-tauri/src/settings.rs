@@ -19,6 +19,8 @@ pub struct AppSettings {
     pub language: String,
     pub soundcheck_start_time: String,
     pub service_start_time: String,
+    pub auto_start_enabled: bool,
+    pub auto_split_enabled: bool,
     pub classifications: Vec<Classification>,
     pub file_path: String,
     pub ini_contents: String,
@@ -93,6 +95,8 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
     let mut language = "da".to_owned();
     let mut soundcheck_start_time = None;
     let mut service_start_time = None;
+    let mut auto_start_enabled = true;
+    let mut auto_split_enabled = true;
     let mut classification_sets: HashMap<String, Vec<Classification>> = HashMap::new();
 
     for (line_index, raw_line) in contents.lines().enumerate() {
@@ -141,6 +145,12 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
                 soundcheck_start_time = Some(value.to_owned())
             }
             "service" if key == "start_time" => service_start_time = Some(value.to_owned()),
+            "service" if key == "auto_start_enabled" => {
+                auto_start_enabled = parse_bool(value, key, path)?
+            }
+            "service" if key == "auto_split_enabled" => {
+                auto_split_enabled = parse_bool(value, key, path)?
+            }
             "classifications" => classification_sets
                 .entry("default".to_owned())
                 .or_default()
@@ -234,9 +244,22 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
         language,
         soundcheck_start_time,
         service_start_time,
+        auto_start_enabled,
+        auto_split_enabled,
         classifications,
         file_path: path.display().to_string(),
     })
+}
+
+fn parse_bool(value: &str, key: &str, path: &Path) -> Result<bool, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!(
+            "Ugyldig [service] {key} i {}. Brug true eller false.",
+            path.display()
+        )),
+    }
 }
 
 fn format_minutes(minutes: u16) -> String {

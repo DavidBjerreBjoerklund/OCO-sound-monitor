@@ -17,6 +17,8 @@ export interface AppSettings {
   language: "da" | "en";
   soundcheckStartTime: string;
   serviceStartTime: string;
+  autoStartEnabled: boolean;
+  autoSplitEnabled: boolean;
   classifications: Classification[];
   filePath: string;
   iniContents: string;

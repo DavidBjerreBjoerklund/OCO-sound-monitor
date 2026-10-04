@@ -135,6 +135,8 @@ const da = {
   worshipTwo: "Lovsang 2",
   announcement: "Meddelelse",
   technicalIssue: "Teknisk problem",
+  automaticServiceStart: "Optagelsen er startet automatisk ved gudstjenestens begyndelse.",
+  automaticServiceSplit: "Optagelsen er delt ved gudstjenestens begyndelse.",
 } as const;
 
 export type TranslationKey = keyof typeof da;
@@ -179,6 +181,8 @@ const en: TranslationTable = {
   unitsCount: "pcs.", defaultUntitled: "Untitled", connectionLost: "The connection to the meter was interrupted.",
   worshipStarts: "Worship starts", sermon: "Sermon", video: "Video", worshipTwo: "Worship 2",
   announcement: "Announcement", technicalIssue: "Technical issue",
+  automaticServiceStart: "Recording started automatically when the service began.",
+  automaticServiceSplit: "Recording split when the service began.",
 };
 
 const translations: Record<Language, TranslationTable> = { da, en };
