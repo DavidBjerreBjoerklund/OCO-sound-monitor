@@ -1,4 +1,4 @@
-name: Build Windows installer
+name: Build macOS installers
 
 on:
   workflow_dispatch:
@@ -7,9 +7,17 @@ permissions:
   contents: read
 
 jobs:
-  installer:
-    name: Windows x64 NSIS installer
-    runs-on: windows-latest
+  dmg:
+    name: macOS ${{ matrix.arch }} DMG
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Check out source
@@ -25,18 +33,15 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install NSIS
-        run: choco install nsis --yes --no-progress
-
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Windows installer
-        run: npm run tauri build -- --bundles nsis
+      - name: Build macOS disk image
+        run: npm run tauri build -- --bundles dmg
 
-      - name: Upload Windows installer
+      - name: Upload macOS disk image
         uses: actions/upload-artifact@v7
         with:
-          name: Sound-Monitor-Windows-x64-Setup
-          path: target/release/bundle/nsis/*.exe
+          name: Sound-Monitor-macOS-${{ matrix.arch }}-DMG
+          path: target/release/bundle/dmg/*.dmg
           if-no-files-found: error

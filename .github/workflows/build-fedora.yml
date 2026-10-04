@@ -11,9 +11,9 @@ permissions:
 
 jobs:
   rpm:
-    name: Fedora 42 x64 RPM
+    name: Fedora 44 x64 RPM
     runs-on: ubuntu-latest
-    container: fedora:42
+    container: fedora:44
 
     steps:
       - name: Install build dependencies
@@ -29,8 +29,6 @@ jobs:
             librsvg2-devel \
             libxdo-devel \
             make \
-            nodejs \
-            npm \
             openssl-devel \
             pkgconf-pkg-config \
             rpm-build \
@@ -39,7 +37,14 @@ jobs:
             webkit2gtk4.1-devel
 
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          check-latest: true
+          cache: npm
 
       - name: Install frontend dependencies
         run: npm ci
@@ -48,8 +53,8 @@ jobs:
         run: npm run tauri build -- --bundles rpm
 
       - name: Upload RPM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: Sound-Monitor-0.2.0-alpha.1-Fedora-x64-RPM
+          name: Sound-Monitor-Fedora-x64-RPM
           path: target/release/bundle/rpm/*.rpm
           if-no-files-found: error

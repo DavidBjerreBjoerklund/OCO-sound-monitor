@@ -17,6 +17,9 @@ npm install
 npm run tauri dev
 ```
 
+See [Releasing binaries](docs/releasing.md) for the GitHub Actions release
+flow and how release visibility follows this repository's visibility.
+
 Run all Rust tests, including the Tauri backend and captured-stream replay:
 
 ```sh

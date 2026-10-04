@@ -1,0 +1,161 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  fedora:
+    name: Fedora 44 x64 RPM
+    runs-on: ubuntu-latest
+    container: fedora:44
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y \
+            cargo \
+            file \
+            gcc \
+            gcc-c++ \
+            git \
+            gtk3-devel \
+            libappindicator-gtk3-devel \
+            librsvg2-devel \
+            libxdo-devel \
+            make \
+            openssl-devel \
+            pkgconf-pkg-config \
+            rpm-build \
+            rust \
+            systemd-devel \
+            webkit2gtk4.1-devel
+
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          check-latest: true
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Fedora RPM
+        run: npm run tauri build -- --bundles rpm
+
+      - name: Upload Fedora RPM
+        uses: actions/upload-artifact@v7
+        with:
+          name: Sound-Monitor-${{ github.ref_name }}-Fedora-x64-RPM
+          path: target/release/bundle/rpm/*.rpm
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64 installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          check-latest: true
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install NSIS
+        run: choco install nsis --yes --no-progress
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Windows installer
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: Sound-Monitor-${{ github.ref_name }}-Windows-x64-Setup
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }} DMG
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          check-latest: true
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build macOS disk image
+        run: npm run tauri build -- --bundles dmg
+
+      - name: Upload macOS disk image
+        uses: actions/upload-artifact@v7
+        with:
+          name: Sound-Monitor-${{ github.ref_name }}-macOS-${{ matrix.arch }}-DMG
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [fedora, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+
+      - name: Create release and upload installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find release-assets -type f -print0)
+          if (( ${#assets[@]} == 0 )); then
+            echo "No release assets were produced" >&2
+            exit 1
+          fi
+          release_args=(--verify-tag --generate-notes --title "Sound Monitor ${GITHUB_REF_NAME}")
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" "${release_args[@]}"
