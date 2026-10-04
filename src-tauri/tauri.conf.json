@@ -30,7 +30,9 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../sound-monitor.ini": "sound-monitor.ini"
+      "../sound-monitor.ini": "sound-monitor.ini",
+      "../LICENSE": "LICENSE",
+      "../THIRD_PARTY_LICENSES.md": "THIRD_PARTY_LICENSES.md"
     },
     "icon": [
       "icons/32x32.png",

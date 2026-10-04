@@ -4,10 +4,6 @@ Cross-platform Tauri desktop application for monitoring and recording sound
 levels from one or more meters. The first supported device is Digital Sound
 8922.
 
-The requirements document is currently in:
-
-`/Users/nyedimser/Downloads/sound-monitor-requirements.md`
-
 ## Quick Start
 
 Install frontend dependencies and start the desktop app:
@@ -113,6 +109,7 @@ Complete data packages are written beside `Sessions` in the platform-specific
 `Exports` directory. Measurement and Statistics CSV exports use the native save
 dialog; bulk measurement exports are streamed to disk without loading all rows
 into memory.
+
 ## Session statistics and storage (version 3)
 
 Version 3 is the only recording format after this update. `session.json` contains
@@ -185,6 +182,17 @@ Port examples by platform:
 - Windows: `COM3`, `COM4`, and so on
 
 Stop with `Ctrl+C`.
+
+## License
+
+Copyright (C) 2026 DavidBjerreBjoerklund and contributors.
+
+Sound Monitor is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See [LICENSE](LICENSE). Keep the copyright and license notices when
+redistributing the software. Third-party components retain their own license
+terms; see the versioned [third-party license inventory](THIRD_PARTY_LICENSES.md).
 
 Read for a fixed number of seconds:
 

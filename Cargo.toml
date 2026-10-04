@@ -2,6 +2,7 @@
 name = "sound-monitor"
 version = "0.2.0-alpha.2"
 edition = "2021"
+license = "GPL-3.0-or-later"
 
 [workspace]
 members = ["src-tauri"]
