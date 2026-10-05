@@ -73,18 +73,16 @@ Sessions are stored below the platform-specific application data directory in
 `session.json` file, a rebuildable `summary.json` cache, and one CSV file per
 device that produced measurements.
 On first launch, the bundled `sound-monitor.ini` is copied directly into the
-`Sessions` directory. This active settings file contains the local service start
-time and the ordered list of classifications shown in the application:
+`Sessions` directory. This active settings file contains the start-time
+list and the ordered classifications shown in the application:
 
 ```ini
 [general]
 language = da
 
-[service]
-soundcheck_start_time = 09:30
-start_time = 10:30
-auto_start_enabled = true
-auto_split_enabled = true
+[start_times]
+point_1 = soundcheck, 09:30, true
+point_2 = event, 10:30, true
 
 [classifications.da]
 service = Gudstjeneste
@@ -96,18 +94,35 @@ soundcheck = Soundcheck
 ```
 
 Classification identifiers use ASCII letters, digits, and hyphens, while labels
-may use normal UTF-8 text. Use the Setup tab to edit and save settings, including
-`language` (`da` or `en`). Changes take effect immediately; new session suggestions
-use the saved schedule. The interface, locale-aware date and number formatting, automatic service
-title, marker presets, and classification labels follow the selected language.
-On Sundays, sessions started from `soundcheck_start_time` until the minute before
-`start_time` are suggested as soundchecks. Sessions started at `start_time` or
-later in the service window are suggested as services. Existing INI files without
-`soundcheck_start_time` use one hour before `start_time`.
-At the configured Sunday `start_time`, `auto_start_enabled` starts a service session
-when none is recording, and `auto_split_enabled` ends an active session and starts
-a new service session. Both options can be changed in Setup. Service titles default
-to the localized classification followed by the event date.
+may use normal UTF-8 text. Use the Setup tab to edit language and classifications.
+Edit schedule times in the recording panel's **Starttid** list. Each row has a
+local time and an active checkbox, and applies every day. At an active time,
+the app starts a session if none is recording, or splits the active recording
+and starts a new session. If the app opens after one or more active times, it
+uses only the latest active time that has passed.
+
+The event title field names the whole event and supplies the title for each cut.
+When the first time has a later time configured, the first recording is
+classified as a soundcheck and named `<soundcheck label> - <event title>`, even
+if the later time is disabled. Disabling the later time leaves the soundcheck
+automatic and makes the main event a manual start. Enabled later times split
+the active recording; those cuts use the event's main classification and title.
+If only one time is configured, it starts with the main classification. An
+empty event title defaults to the main classification followed by the event
+date. The title field starts with that default selected on focus so typing
+replaces it.
+
+While recording, **Stop** ends the current recording and **Start session** can
+then create a separate recording from the event fields. **Next point** ends the
+current recording and starts the following configured point immediately, even
+when that point is unchecked for automatic starting.
+
+Existing INI files with no `[start_times]` section are read using their legacy
+`soundcheck_start_time`, `start_time`, `auto_start_enabled`, and
+`auto_split_enabled` values. Saving the Starttid list writes the new schedule
+format while preserving the rest of the settings file. The interface,
+locale-aware date and number formatting, marker presets, and classification
+labels follow the selected language.
 Existing sessions retain their stable stored classification ID if its INI entry is
 later removed. Legacy files with a single `[classifications]` section remain valid
 and default to Danish.

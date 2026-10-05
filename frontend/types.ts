@@ -13,12 +13,19 @@ export interface Classification {
   label: string;
 }
 
+export interface StartTimePoint {
+  id: string;
+  time: string;
+  enabled: boolean;
+}
+
 export interface AppSettings {
   language: "da" | "en";
   soundcheckStartTime: string;
   serviceStartTime: string;
   autoStartEnabled: boolean;
   autoSplitEnabled: boolean;
+  startTimes: StartTimePoint[];
   classifications: Classification[];
   filePath: string;
   iniContents: string;
