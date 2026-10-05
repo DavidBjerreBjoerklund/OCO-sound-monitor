@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { previewStatistics } from "./previewStatistics";
 import { save } from "@tauri-apps/plugin-dialog";
+import { iniValue, startTimePoints } from "./setupIni";
 import type {
   DeviceDescriptor,
   DeviceEvent,
@@ -28,6 +29,7 @@ interface ConnectOptions {
 const mockConnections = new Map<string, number>();
 const mockArchive = new Map<string, SessionDetail>();
 let mockActive: SessionDetail | null = null;
+let mockSettings: AppSettings | null = null;
 
 export function isDesktopRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
@@ -39,15 +41,20 @@ function previewLanguage(): "da" | "en" {
 
 export async function getSettings(): Promise<AppSettings> {
   if (isDesktopRuntime()) return invoke<AppSettings>("get_settings");
+  if (mockSettings) return mockSettings;
   const language = previewLanguage();
-  return {
+  mockSettings = {
     language,
     soundcheckStartTime: "09:30",
     serviceStartTime: "10:30",
     autoStartEnabled: true,
     autoSplitEnabled: true,
     filePath: "Preview-hukommelse/Sessions/sound-monitor.ini",
-    iniContents: `[general]\nlanguage = ${language}\n[service]\nsoundcheck_start_time = 09:30\nstart_time = 10:30\nauto_start_enabled = true\nauto_split_enabled = true\n[classifications.${language}]\nservice = ${language === "da" ? "Gudstjeneste" : "Service"}\nsoundcheck = ${language === "da" ? "Lydprøve" : "Soundcheck"}\n[nextcloud]\n; base_url = https://cloud.example.org/remote.php/dav/files/user\n; remote_path = SoundMonitor\n; username = user\n; credential_reference = sound-monitor/nextcloud\n`,
+    startTimes: [
+      { id: "soundcheck", time: "09:30", enabled: true },
+      { id: "event", time: "10:30", enabled: true },
+    ],
+    iniContents: `[general]\nlanguage = ${language}\n[service]\nsoundcheck_start_time = 09:30\nstart_time = 10:30\nauto_start_enabled = true\nauto_split_enabled = true\n[start_times]\npoint_1 = soundcheck, 09:30, true\npoint_2 = event, 10:30, true\n[classifications.${language}]\nservice = ${language === "da" ? "Gudstjeneste" : "Service"}\nsoundcheck = ${language === "da" ? "Lydprøve" : "Soundcheck"}\n[nextcloud]\n; base_url = https://cloud.example.org/remote.php/dav/files/user\n; remote_path = SoundMonitor\n; username = user\n; credential_reference = sound-monitor/nextcloud\n`,
     nextcloud: { baseUrl: "", remotePath: "", username: "", credentialReference: "" },
     classifications: language === "da" ? [
       { id: "service", label: "Gudstjeneste" }, { id: "worship-night", label: "Lovsangsaften" },
@@ -61,6 +68,7 @@ export async function getSettings(): Promise<AppSettings> {
       { id: "special", label: "Special event" },
     ],
   };
+  return mockSettings;
 }
 
 function seedStatisticsPreview(): void {
@@ -360,7 +368,15 @@ export async function getActiveStatistics(): Promise<LiveStatistics | null> {
 }
 export async function saveSettings(contents: string): Promise<AppSettings> {
   if (isDesktopRuntime()) return invoke<AppSettings>("save_settings", { contents });
-  throw new Error("Settings can only be saved in the desktop app.");
+  const current = mockSettings ?? await getSettings();
+  const language = iniValue(contents, "general", "language");
+  mockSettings = {
+    ...current,
+    ...(language === "da" || language === "en" ? { language } : {}),
+    startTimes: startTimePoints(contents),
+    iniContents: contents,
+  };
+  return mockSettings;
 }
 export async function openRecordingsFolder(): Promise<void> {
   if (isDesktopRuntime()) await invoke("open_recordings_folder");

@@ -15,12 +15,21 @@ pub struct Classification {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StartTimePoint {
+    pub id: String,
+    pub time: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub language: String,
     pub soundcheck_start_time: String,
     pub service_start_time: String,
     pub auto_start_enabled: bool,
     pub auto_split_enabled: bool,
+    pub start_times: Vec<StartTimePoint>,
     pub classifications: Vec<Classification>,
     pub file_path: String,
     pub ini_contents: String,
@@ -97,6 +106,8 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
     let mut service_start_time = None;
     let mut auto_start_enabled = true;
     let mut auto_split_enabled = true;
+    let mut start_times = Vec::new();
+    let mut has_start_times_section = false;
     let mut classification_sets: HashMap<String, Vec<Classification>> = HashMap::new();
 
     for (line_index, raw_line) in contents.lines().enumerate() {
@@ -106,6 +117,9 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
         }
         if line.starts_with('[') && line.ends_with(']') {
             section = line[1..line.len() - 1].trim();
+            if section == "start_times" {
+                has_start_times_section = true;
+            }
             continue;
         }
         let (key, value) = line.split_once('=').ok_or_else(|| {
@@ -151,6 +165,40 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
             "service" if key == "auto_split_enabled" => {
                 auto_split_enabled = parse_bool(value, key, path)?
             }
+            "start_times" if key.starts_with("point_") => {
+                let mut parts = value.split(',').map(str::trim);
+                let id = parts.next().unwrap_or_default();
+                let time = parts.next().unwrap_or_default();
+                let enabled = parts.next().unwrap_or_default();
+                if id.is_empty() || time.is_empty() || enabled.is_empty() || parts.next().is_some()
+                {
+                    return Err(format!(
+                        "Ugyldigt [start_times] {key} i {}. Brug id, HH:MM, true/false.",
+                        path.display()
+                    ));
+                }
+                if !id
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+                {
+                    return Err(format!(
+                        "Ugyldigt starttids-id '{}' i {}. Brug kun a-z, 0-9 og bindestreg.",
+                        id,
+                        path.display()
+                    ));
+                }
+                parse_time_minutes(time).map_err(|message| {
+                    format!(
+                        "Ugyldigt tidspunkt for [start_times] {key} i {}: {message}",
+                        path.display()
+                    )
+                })?;
+                start_times.push(StartTimePoint {
+                    id: id.to_owned(),
+                    time: time.to_owned(),
+                    enabled: parse_bool(enabled, key, path)?,
+                });
+            }
             "classifications" => classification_sets
                 .entry("default".to_owned())
                 .or_default()
@@ -181,8 +229,16 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
         ));
     }
 
-    let service_start_time = service_start_time
-        .ok_or_else(|| format!("{} mangler [service] start_time.", path.display()))?;
+    let service_start_time = if has_start_times_section {
+        start_times
+            .last()
+            .map(|point| point.time.clone())
+            .or(service_start_time)
+            .unwrap_or_else(|| "00:00".to_owned())
+    } else {
+        service_start_time
+            .ok_or_else(|| format!("{} mangler [service] start_time.", path.display()))?
+    };
     parse_time_minutes(&service_start_time).map_err(|message| {
         format!(
             "Ugyldigt [service] start_time i {}: {message}",
@@ -191,8 +247,16 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
     })?;
     let service_start_minutes =
         parse_time_minutes(&service_start_time).expect("service start time was validated above");
-    let soundcheck_start_time = soundcheck_start_time
-        .unwrap_or_else(|| format_minutes((service_start_minutes + 24 * 60 - 60) % (24 * 60)));
+    let soundcheck_start_time = if has_start_times_section {
+        start_times
+            .first()
+            .map(|point| point.time.clone())
+            .or(soundcheck_start_time)
+            .unwrap_or_else(|| format_minutes((service_start_minutes + 24 * 60 - 60) % (24 * 60)))
+    } else {
+        soundcheck_start_time
+            .unwrap_or_else(|| format_minutes((service_start_minutes + 24 * 60 - 60) % (24 * 60)))
+    };
     let soundcheck_start_minutes =
         parse_time_minutes(&soundcheck_start_time).map_err(|message| {
             format!(
@@ -200,11 +264,50 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
                 path.display()
             )
         })?;
-    if soundcheck_start_minutes >= service_start_minutes {
+    if !has_start_times_section && soundcheck_start_minutes >= service_start_minutes {
         return Err(format!(
             "[service] soundcheck_start_time skal ligge før start_time i {}.",
             path.display()
         ));
+    }
+    if !has_start_times_section {
+        start_times = vec![
+            StartTimePoint {
+                id: "soundcheck".to_owned(),
+                time: soundcheck_start_time.clone(),
+                enabled: auto_start_enabled,
+            },
+            StartTimePoint {
+                id: "event".to_owned(),
+                time: service_start_time.clone(),
+                enabled: auto_split_enabled,
+            },
+        ];
+    }
+    let mut seen_start_time_ids = HashSet::new();
+    let mut previous_start_time = None;
+    for point in &start_times {
+        if !seen_start_time_ids.insert(point.id.as_str()) {
+            return Err(format!(
+                "Starttids-id '{}' forekommer flere gange i {}.",
+                point.id,
+                path.display()
+            ));
+        }
+        let minutes = parse_time_minutes(&point.time).map_err(|message| {
+            format!(
+                "Ugyldigt starttidspunkt '{}' i {}: {message}",
+                point.time,
+                path.display()
+            )
+        })?;
+        if previous_start_time.is_some_and(|previous| minutes <= previous) {
+            return Err(format!(
+                "Tidspunkterne i [start_times] skal stå i stigende rækkefølge og være forskellige i {}.",
+                path.display()
+            ));
+        }
+        previous_start_time = Some(minutes);
     }
     let mut classifications = classification_sets
         .remove(&language)
@@ -246,6 +349,7 @@ fn parse_settings(contents: &str, path: &Path) -> Result<AppSettings, String> {
         service_start_time,
         auto_start_enabled,
         auto_split_enabled,
+        start_times,
         classifications,
         file_path: path.display().to_string(),
     })
@@ -256,7 +360,7 @@ fn parse_bool(value: &str, key: &str, path: &Path) -> Result<bool, String> {
         "true" => Ok(true),
         "false" => Ok(false),
         _ => Err(format!(
-            "Ugyldig [service] {key} i {}. Brug true eller false.",
+            "Ugyldig boolsk værdi for '{key}' i {}. Brug true eller false.",
             path.display()
         )),
     }
