@@ -143,8 +143,10 @@ At startup, all saved recordings that lack software-version metadata are
 migrated in place, regardless of their recording date. This includes the
 old six-column raw format and the previous nine-column format. CSV replacements
 are atomic and session metadata is updated last, so an interrupted migration
-can resume safely. Invalid measurement data prevents that session from being
-rewritten. For recordings already reduced to buckets, original
+can resume safely. Before conversion, original legacy measurement CSVs are
+copied into `Sessions/backups/<year>/<session-id>/`. Invalid measurement data
+prevents that session from being rewritten. For recordings already reduced to
+buckets, original
 minima/maxima/counts are preserved; time integration uses the remaining bucket
 levels. Missing sample timing and intra-bucket red crossings cannot be
 recovered, so those legacy statistics remain explicitly approximate.

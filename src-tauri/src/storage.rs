@@ -758,6 +758,17 @@ fn write_session_metadata(directory: &Path, session: &Session) -> Result<(), Str
 }
 
 fn migrate_logs(root: &Path) -> Result<usize, String> {
+    // Preserve every legacy measurement file before changing any original CSV.
+    // Mirror the year/session layout beneath Sessions/backups so files remain
+    // easy to associate with their source session.
+    for directory in session_directories(root)? {
+        for path in measurement_csv_paths(&directory)? {
+            if !measurement_csv_has_software_versions(&path)? {
+                backup_measurement_csv(root, &path)?;
+            }
+        }
+    }
+
     let mut count = 0;
     for directory in session_directories(root)? {
         let mut session = read_session_metadata(&directory)?;
@@ -833,6 +844,40 @@ fn migrate_logs(root: &Path) -> Result<usize, String> {
         count += 1;
     }
     Ok(count)
+}
+
+fn backup_measurement_csv(root: &Path, source: &Path) -> Result<(), String> {
+    let relative_path = source
+        .strip_prefix(root)
+        .map_err(|error| format!("Målefilen ligger uden for sessionsmappen: {error}"))?;
+    let backup = root.join("backups").join(relative_path);
+    let original = fs::read(source).map_err(|error| {
+        format!("Kunne ikke læse den gamle målefil {}: {error}", source.display())
+    })?;
+
+    match fs::read(&backup) {
+        Ok(existing) if existing == original => return Ok(()),
+        Ok(_) => {
+            return Err(format!(
+                "Backupfilen findes allerede og er anderledes end originalen: {}",
+                backup.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Kunne ikke kontrollere backupfilen {}: {error}",
+                backup.display()
+            ));
+        }
+    }
+
+    crate::backend::atomic_write(&backup, &original).map_err(|error| {
+        format!(
+            "Kunne ikke gemme backup af målefilen {}: {error}",
+            source.display()
+        )
+    })
 }
 
 fn measurement_csv_paths(directory: &Path) -> Result<Vec<PathBuf>, String> {
