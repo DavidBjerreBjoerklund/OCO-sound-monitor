@@ -19,7 +19,7 @@ source private.
 Keep the application version in sync in `package.json`, `package-lock.json`,
 `Cargo.toml`, `src-tauri/Cargo.toml`, `Cargo.lock`, and
 `src-tauri/tauri.conf.json`. For an alpha release, use a tag such as
-`v0.2.0-alpha.4`; the release workflow marks tags containing `-` as
+`v0.2.0-alpha.5`; the release workflow marks tags containing `-` as
 pre-releases.
 
 ## Build workflows
@@ -43,7 +43,7 @@ saved as workflow artifacts.
 `.github/workflows/release.yml` builds all supported installers when a tag
 matching `v*` is pushed. It publishes the GitHub Release only after every
 platform build succeeds. It adds Fedora and Windows installers plus both macOS
-DMGs. Tags containing a hyphen, such as `v0.2.0-alpha.4`, are marked as
+DMGs. Tags containing a hyphen, such as `v0.2.0-alpha.5`, are marked as
 pre-releases.
 
 The publish job uses the workflow's `GITHUB_TOKEN`, with `contents: write` for
