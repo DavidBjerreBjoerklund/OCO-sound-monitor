@@ -8,14 +8,18 @@ permissions:
 
 jobs:
   dmg:
-    name: macOS ${{ matrix.arch }} DMG
+    name: macOS ${{ matrix.label }} DMG
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: arm64
+            label: Apple Silicon
+            asset_label: Apple-Silicon
             runner: macos-15
           - arch: x64
+            label: x64
+            asset_label: x64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
 
@@ -39,9 +43,21 @@ jobs:
       - name: Build macOS disk image
         run: npm run tauri build -- --bundles dmg
 
+      - name: Rename macOS disk image
+        env:
+          ASSET_NAME: Sound-Monitor-${{ github.ref_name }}-macOS-${{ matrix.asset_label }}.dmg
+        run: |
+          shopt -s nullglob
+          images=(target/release/bundle/dmg/*.dmg)
+          if [[ "${#images[@]}" -ne 1 ]]; then
+            echo "Expected one macOS disk image, found ${#images[@]}" >&2
+            exit 1
+          fi
+          mv "${images[0]}" "target/release/bundle/dmg/${ASSET_NAME}"
+
       - name: Upload macOS disk image
         uses: actions/upload-artifact@v7
         with:
-          name: Sound-Monitor-macOS-${{ matrix.arch }}-DMG
+          name: Sound-Monitor-macOS-${{ matrix.label }}-DMG
           path: target/release/bundle/dmg/*.dmg
           if-no-files-found: error
