@@ -2987,7 +2987,7 @@ dependencies = [
 
 [[package]]
 name = "sound-monitor"
-version = "0.2.0-alpha.5"
+version = "0.2.0-alpha.6"
 dependencies = [
  "chrono",
  "serde",
@@ -2996,7 +2996,7 @@ dependencies = [
 
 [[package]]
 name = "sound-monitor-desktop"
-version = "0.2.0-alpha.5"
+version = "0.2.0-alpha.6"
 dependencies = [
  "chrono",
  "chrono-tz",

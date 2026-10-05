@@ -1,6 +1,9 @@
 // Preserve unrelated sections, ordering and comments when editing form fields.
 import type { StartTimePoint } from "./types";
 
+export const eventDaysOfWeek = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+export type EventDay = typeof eventDaysOfWeek[number];
+
 export function iniValue(contents: string, section: string, key: string): string {
   let current = "";
   for (const line of contents.split(/\r?\n/)) {
@@ -32,13 +35,37 @@ export function setIniValue(contents: string, section: string, key: string, valu
   return lines.join("\n");
 }
 
-export function startTimePoints(contents: string): StartTimePoint[] {
+export function eventDays(contents: string, eventType: string): EventDay[] {
+  const value = iniValue(contents, "event_days", eventType).toLowerCase();
+  if (!value) return [...eventDaysOfWeek];
+  if (value === "none") return [];
+  const configured = new Set(value.split(/[\s,]+/).filter(Boolean));
+  return eventDaysOfWeek.filter((day) => configured.has(day));
+}
+
+export function setEventDays(contents: string, eventType: string, days: EventDay[]): string {
+  const selected = new Set(days);
+  const value = eventDaysOfWeek.filter((day) => selected.has(day)).join(",") || "none";
+  return setIniValue(contents, "event_days", eventType, value);
+}
+
+export function eventTypeIsActiveOnDate(contents: string, eventType: string, date: string): boolean {
+  const [year, month, day] = date.split("-").map(Number);
+  if (!year || !month || !day) return true;
+  const weekday = new Date(year, month - 1, day).getDay();
+  const weekdayKey = (["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const)[weekday];
+  return eventDays(contents, eventType).includes(weekdayKey);
+}
+
+function startTimePointsInSection(contents: string, section: string): { exists: boolean; points: StartTimePoint[] } {
   const points: StartTimePoint[] = [];
   let inSection = false;
+  let exists = false;
   for (const line of contents.split(/\r?\n/)) {
     const text = line.trim();
     if (text.startsWith("[") && text.endsWith("]")) {
-      inSection = text.slice(1, -1).trim() === "start_times";
+      inSection = text.slice(1, -1).trim() === section;
+      if (inSection) exists = true;
       continue;
     }
     if (!inSection || !text.startsWith("point_") || text.startsWith(";") || text.startsWith("#")) continue;
@@ -49,19 +76,28 @@ export function startTimePoints(contents: string): StartTimePoint[] {
     if (!key.startsWith("point_") || !id || !time || !enabled) continue;
     points.push({ id, time, enabled: enabled.toLowerCase() === "true" });
   }
-  return points;
+  return { exists, points };
 }
 
-export function setStartTimePoints(contents: string, points: StartTimePoint[]): string {
+export function startTimePoints(contents: string, eventType?: string): StartTimePoint[] {
+  if (eventType) {
+    const specific = startTimePointsInSection(contents, `start_times.${eventType}`);
+    if (specific.exists) return specific.points;
+  }
+  return startTimePointsInSection(contents, "start_times").points;
+}
+
+export function setStartTimePoints(contents: string, points: StartTimePoint[], eventType?: string): string {
+  const section = eventType ? `start_times.${eventType}` : "start_times";
   const lines = contents.split(/\r?\n/);
   const start = lines.findIndex((line) => {
     const text = line.trim();
-    return text.startsWith("[") && text.endsWith("]") && text.slice(1, -1).trim() === "start_times";
+    return text.startsWith("[") && text.endsWith("]") && text.slice(1, -1).trim() === section;
   });
   const entries = points.map((point, index) => `point_${index + 1} = ${point.id}, ${point.time}, ${point.enabled}`);
   if (start < 0) {
     const prefix = contents.trimEnd();
-    return `${prefix}${prefix ? "\n\n" : ""}[start_times]\n${entries.join("\n")}${entries.length ? "\n" : ""}`;
+    return `${prefix}${prefix ? "\n\n" : ""}[${section}]\n${entries.join("\n")}${entries.length ? "\n" : ""}`;
   }
 
   let end = lines.length;

@@ -1,15 +1,11 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity, Archive, Cable, CalendarDays, Check, Circle, Clock3, Download, Eye, EyeOff,
-  ChartNoAxesCombined, Flag, FolderOpen, Gauge, HardDrive, Package, Plus, Plug, RefreshCw, Search, Square,
+  ChartNoAxesCombined, Flag, FolderOpen, Gauge, HardDrive, Package, Plug, RefreshCw, Search, Square,
   Scissors, Users, Wifi, WifiOff, X, Settings,
 } from "lucide-react";
 import {
-  CartesianGrid, Line, LineChart, ReferenceArea, ReferenceLine, ResponsiveContainer,
-  Tooltip, XAxis, YAxis,
-} from "recharts";
-import {
-  addMarker, compareSessions, connectDevice, disconnectDevice, exportMeasurementsCsv, exportSession,
+  compareSessions, connectDevice, disconnectDevice, exportMeasurementsCsv, exportSession,
   exportStatisticsCsv,
   getActiveStatistics, getSettings, isDesktopRuntime, libraryLocation, listDevices, listSessions, loadSession, startSession,
   stopSession, suggestSession, setSessionHidden,
@@ -20,7 +16,9 @@ import type {
 } from "./types";
 import SetupDialog from "./SetupDialog";
 import StartTimesPanel from "./StartTimesPanel";
-import StatisticsView from "./StatisticsView";
+const MeasurementChart = lazy(() => import("./MeasurementChart"));
+const StatisticsView = lazy(() => import("./StatisticsView"));
+import { eventTypeIsActiveOnDate, startTimePoints } from "./setupIni";
 import { localeFor, translate, type Language } from "./i18n";
 import { recentMaximum, rollingLeq } from "./liveMetrics";
 
@@ -49,18 +47,19 @@ function defaultEventTitle(eventType: string, eventDate: string, settings: AppSe
   return `${classification} ${formatDate(eventDate, language)}`;
 }
 
-function nextStartTimePoint(session: Session | null, settings: AppSettings | null): { point: StartTimePoint; index: number } | null {
-  if (!session || !settings) return null;
+function nextStartTimePoint(session: Session | null, startTimes: StartTimePoint[]): { point: StartTimePoint; index: number } | null {
+  if (!session) return null;
   const started = new Date(session.started);
   const sessionStartMinutes = started.getHours() * 60 + started.getMinutes();
   let currentPointIndex = -1;
-  for (let index = 0; index < settings.startTimes.length; index += 1) {
-    const [hours, minutes] = settings.startTimes[index].time.split(":").map(Number);
+  for (let index = 0; index < startTimes.length; index += 1) {
+    const [hours, minutes] = startTimes[index].time.split(":").map(Number);
     if (hours * 60 + minutes > sessionStartMinutes) break;
     currentPointIndex = index;
   }
-  const index = currentPointIndex + 1;
-  const point = settings.startTimes[index];
+  const index = startTimes.findIndex((point, pointIndex) => pointIndex > currentPointIndex && point.enabled);
+  if (index < 0) return null;
+  const point = startTimes[index];
   return point ? { point, index } : null;
 }
 
@@ -93,54 +92,11 @@ function levelStatus(level: number | undefined, language: Language) {
   return { tone: "safe", label: translate(language, "good") };
 }
 
-function chartLevel(measurements: Measurement[], index: number): number {
-  const measurement = measurements[index];
-  const maximum = measurement.maximumDb;
-  if (maximum === undefined || index === 0 || index === measurements.length - 1) {
-    return measurement.levelDb;
-  }
-
-  const previousMaximum = measurements[index - 1].maximumDb ?? measurements[index - 1].levelDb;
-  const nextMaximum = measurements[index + 1].maximumDb ?? measurements[index + 1].levelDb;
-  const isLocalPeak = maximum > measurement.levelDb
-    && maximum >= previousMaximum
-    && maximum > nextMaximum;
-  return isLocalPeak ? maximum : measurement.levelDb;
-}
-
 function Chart({ measurements, markers = [], emptyText, recentPeak, language }: { measurements: Measurement[]; markers?: Marker[]; emptyText: string; recentPeak?: number | null; language: Language }) {
-  const levelGradientId = `level-gradient-${useId().replaceAll(":", "")}`;
-  const data = measurements.map((measurement, index) => ({
-    at: new Date(measurement.timestamp).getTime(),
-    level: chartLevel(measurements, index),
-  }));
   return <div className="chart-wrap" aria-label={translate(language, "soundLevelChart")}>
-    {data.length > 1 ? <ResponsiveContainer width="100%" height="100%">
-      <LineChart data={data} margin={{ top: 10, right: 18, bottom: 4, left: -18 }}>
-        <defs>
-          <linearGradient id={levelGradientId} x1="0" y1="0%" x2="0" y2="100%" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stopColor="#ef6b5a" />
-            <stop offset="25%" stopColor="#ef6b5a" />
-            <stop offset="25.1%" stopColor="#e6b84b" />
-            <stop offset="35%" stopColor="#e6b84b" />
-            <stop offset="35.1%" stopColor="#79c95d" />
-            <stop offset="100%" stopColor="#79c95d" />
-          </linearGradient>
-        </defs>
-        <ReferenceArea y1={30} y2={82} fill="#5cbf78" fillOpacity={0.04} />
-        <ReferenceArea y1={82} y2={90} fill="#e6b84b" fillOpacity={0.09} />
-        <ReferenceArea y1={90} y2={110} fill="#ef6b5a" fillOpacity={0.1} />
-        <CartesianGrid stroke="#303531" vertical={false} />
-        <XAxis dataKey="at" type="number" domain={["dataMin", "dataMax"]} stroke="#7f8982" tickLine={false} axisLine={false} minTickGap={64} tick={{ fontSize: 11 }} tickFormatter={(value) => formatChartTime(new Date(value).toISOString(), language)} />
-        <YAxis domain={[30, 110]} ticks={[30, 50, 70, 90, 110]} stroke="#7f8982" tickLine={false} axisLine={false} tick={{ fontSize: 11 }} />
-        <Tooltip contentStyle={{ background: "#202421", border: "1px solid #3b423d", borderRadius: 4, color: "#f0f2ee" }} formatter={(value) => [`${Number(value).toFixed(1)} dB`, translate(language, "level")]} labelFormatter={(value) => formatChartTime(new Date(Number(value)).toISOString(), language)} labelStyle={{ color: "#9aa39d" }} />
-        <ReferenceLine y={82} stroke="#caa23f" strokeDasharray="4 4" label={{ value: "82", position: "insideRight", fill: "#d9b64f", fontSize: 10 }} />
-        <ReferenceLine y={90} stroke="#df6657" strokeDasharray="4 4" label={{ value: "90", position: "insideRight", fill: "#f07a6b", fontSize: 10 }} />
-        {recentPeak !== null && recentPeak !== undefined && <ReferenceLine y={recentPeak} stroke="#a9b2ac" strokeDasharray="2 5" strokeOpacity={0.75} label={{ value: translate(language, "recentPeak"), position: "insideTopLeft", fill: "#a9b2ac", fontSize: 10 }} />}
-        {markers.map((marker) => <ReferenceLine key={marker.id} x={new Date(marker.timestamp).getTime()} stroke="#48c9b0" strokeDasharray="3 3" label={{ value: marker.label, position: "insideTopRight", fill: "#8de0cf", fontSize: 10 }} />)}
-        <Line type="monotone" dataKey="level" stroke={`url(#${levelGradientId})`} strokeWidth={2} dot={false} isAnimationActive={false} />
-      </LineChart>
-    </ResponsiveContainer> : <div className="chart-empty"><Activity size={26} /><span>{emptyText}</span></div>}
+    {measurements.length > 1
+      ? <Suspense fallback={<div className="chart-loading" aria-busy="true" />}><MeasurementChart measurements={measurements} markers={markers} recentPeak={recentPeak} language={language} /></Suspense>
+      : <div className="chart-empty"><Activity size={26} /><span>{emptyText}</span></div>}
   </div>;
 }
 
@@ -170,7 +126,7 @@ function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [title, setTitle] = useState("");
   const [eventType, setEventType] = useState("service");
-  const [date, setDate] = useState(localDateValue(new Date()));
+  const defaultTitleRef = useRef("");
   const [engineer, setEngineer] = useState("");
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const processedStartTimes = useRef(new Set<string>());
@@ -180,13 +136,28 @@ function App() {
   const [showHidden, setShowHidden] = useState(false);
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
   const [archivePath, setArchivePath] = useState("");
-  const [markerLabel, setMarkerLabel] = useState("");
-  const [markerNote, setMarkerNote] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [hideCandidate, setHideCandidate] = useState<Session | null>(null);
   const [hideBusy, setHideBusy] = useState(false);
+  const [lateStartPrompt, setLateStartPrompt] = useState<{ point: StartTimePoint; index: number; date: string } | null>(null);
+  const [lateStartBusy, setLateStartBusy] = useState(false);
+  const lateStartPromptKey = useRef<string | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
   const language: Language = settings?.language ?? "da";
+  const eventTypeStartTimes = settings ? startTimePoints(settings.iniContents, eventType) : [];
+  const currentDate = localDateValue(clock);
+  const previousDateRef = useRef(currentDate);
+  const currentDefaultTitle = defaultEventTitle(eventType, currentDate, settings, language);
+  const resolveEventTitle = (type: string, eventDate: string) => {
+    const generatedTitle = defaultEventTitle(type, eventDate, settings, language);
+    const enteredTitle = title.trim();
+    return !enteredTitle || enteredTitle === defaultTitleRef.current || enteredTitle === generatedTitle
+      ? generatedTitle
+      : enteredTitle;
+  };
+  const rememberDefaultTitle = (value: string, type: string, eventDate: string) => {
+    defaultTitleRef.current = value === defaultEventTitle(type, eventDate, settings, language) ? value : "";
+  };
 
   const refreshDevices = useCallback(async () => {
     try {
@@ -205,24 +176,34 @@ function App() {
   }, [showHidden]);
 
   useEffect(() => {
+    if (previousDateRef.current === currentDate) return;
+    previousDateRef.current = currentDate;
+    if (!defaultTitleRef.current || title.trim() !== defaultTitleRef.current) return;
+    const nextDefault = defaultEventTitle(eventType, currentDate, settings, language);
+    defaultTitleRef.current = nextDefault;
+    setTitle(nextDefault);
+  }, [currentDate, eventType, language, settings, title]);
+
+  useEffect(() => {
     void refreshDevices();
     void getSettings().then(async (loadedSettings) => {
       setSettings(loadedSettings);
       document.documentElement.lang = loadedSettings.language;
-      setMarkerLabel((current) => current || translate(loadedSettings.language, "worshipStarts"));
       const suggestion = await suggestSession();
-      const suggestedDate = suggestion.draft.date ?? localDateValue(new Date());
+      const suggestedDate = localDateValue(new Date());
       const proposedEventType = suggestion.draft.eventType ?? "service";
       const suggestedEventType = proposedEventType === "soundcheck" ? "service" : proposedEventType;
       const suggestedTitle = suggestion.draft.title ?? "";
       const classificationLabel = loadedSettings.classifications.find((item) => item.id === suggestedEventType)?.label;
       const suggestedTitleIsClassification = loadedSettings.classifications.some((item) => item.label === suggestedTitle.trim());
-      const mainSuggestedTitle = proposedEventType === "soundcheck" || !suggestedTitle.trim() || suggestedTitleIsClassification
+      const usesGeneratedTitle = proposedEventType === "soundcheck" || !suggestedTitle.trim() || suggestedTitleIsClassification
+        || suggestedTitle.trim() === defaultEventTitle(suggestedEventType, suggestedDate, loadedSettings, loadedSettings.language);
+      const mainSuggestedTitle = usesGeneratedTitle
         ? defaultEventTitle(suggestedEventType, suggestedDate, loadedSettings, loadedSettings.language)
         : suggestedTitle;
       setTitle(mainSuggestedTitle || (classificationLabel ?? ""));
+      defaultTitleRef.current = usesGeneratedTitle ? mainSuggestedTitle : "";
       setEventType(suggestedEventType);
-      setDate(suggestedDate);
     }).catch((reason) => setError(String(reason)));
     void libraryLocation().then(setArchivePath).catch(() => undefined);
     const timer = window.setInterval(() => setClock(new Date()), 1000);
@@ -286,24 +267,25 @@ function App() {
         await refreshArchive(); return;
       }
       const descriptor = devices.find((device) => device.serialPort === selectedPort);
-      const now = new Date();
-      const sessionTitle = title.trim() || defaultEventTitle(eventType, date || localDateValue(now), settings, language);
+      const eventDate = localDateValue(new Date());
+      const sessionTitle = resolveEventTitle(eventType, eventDate);
       const session = await startSession({
-        title: sessionTitle, eventType, eventDate: date,
+        title: sessionTitle, eventType, eventDate,
         responsibleEngineerName: engineer.trim() || null,
         devices: activeDeviceId && descriptor ? [{ id: activeDeviceId, name: descriptor.name, driver: descriptor.driver, serialPort: descriptor.serialPort, location: descriptor.location, weighting, response }] : [],
       });
       setTitle(sessionTitle);
+      rememberDefaultTitle(sessionTitle, eventType, eventDate);
       setSessionStatistics(null); setMeasurements([]); setActiveSession(session);
     } catch (reason) { setError(String(reason)); }
   };
 
   const splitSession = async () => {
-    const next = nextStartTimePoint(activeSession, settings);
+    const next = nextStartTimePoint(activeSession, eventTypeStartTimes);
     if (!activeSession || !settings || !next) return;
-    const eventDate = activeSession.eventDate || date || localDateValue(new Date());
-    const mainTitle = title.trim() || defaultEventTitle(eventType, eventDate, settings, language);
-    const isSoundcheck = next.index === 0 && settings.startTimes.length > 1;
+    const eventDate = localDateValue(new Date());
+    const mainTitle = resolveEventTitle(eventType, eventDate);
+    const isSoundcheck = next.index === 0 && eventTypeStartTimes.length > 1;
     const soundcheckLabel = settings.classifications.find((item) => item.id === "soundcheck")?.label
       ?? (language === "da" ? "Lydprøve" : "Soundcheck");
     const nextTitle = isSoundcheck ? `${soundcheckLabel} - ${mainTitle}` : mainTitle;
@@ -320,11 +302,11 @@ function App() {
         responsibleEngineerName: engineer.trim() || null,
         devices: activeDeviceId && descriptor ? [{ id: activeDeviceId, name: descriptor.name, driver: descriptor.driver, serialPort: descriptor.serialPort, location: descriptor.location, weighting, response }] : [],
       });
-      const processedKey = `${localDateValue(new Date())}:${next.point.id}`;
+      const processedKey = `${localDateValue(new Date())}:${eventType}:${next.point.id}`;
       processedStartTimes.current.add(processedKey);
       try { window.localStorage.setItem(`sound-monitor:start-time:${processedKey}`, "done"); } catch { /* The in-memory guard still prevents duplicate actions in this run. */ }
       setTitle(mainTitle);
-      setDate(eventDate);
+      rememberDefaultTitle(mainTitle, eventType, eventDate);
       setSessionStatistics(null);
       setMeasurements([]);
       setActiveSession(session);
@@ -336,51 +318,130 @@ function App() {
     }
   };
 
+  const markLateStartProcessed = (pending: { point: StartTimePoint; date: string }) => {
+    const key = `${pending.date}:${eventType}:${pending.point.id}`;
+    processedStartTimes.current.add(key);
+    try { window.localStorage.setItem(`sound-monitor:start-time:${key}`, "done"); } catch { /* The in-memory guard still prevents duplicate actions in this run. */ }
+    lateStartPromptKey.current = null;
+  };
+
+  const skipLateStart = () => {
+    if (!lateStartPrompt) return;
+    markLateStartProcessed(lateStartPrompt);
+    setLateStartPrompt(null);
+  };
+
+  const confirmLateStart = async () => {
+    if (!lateStartPrompt || !settings || lateStartBusy || activeSession) return;
+    setLateStartBusy(true);
+    setError(null);
+    const eventDate = lateStartPrompt.date;
+    const mainTitle = resolveEventTitle(eventType, eventDate);
+    const isSoundcheck = lateStartPrompt.index === 0 && eventTypeStartTimes.length > 1;
+    const soundcheckLabel = settings.classifications.find((item) => item.id === "soundcheck")?.label
+      ?? (language === "da" ? "Lydprøve" : "Soundcheck");
+    const sessionTitle = isSoundcheck ? `${soundcheckLabel} - ${mainTitle}` : mainTitle;
+    const descriptor = devices.find((device) => device.serialPort === selectedPort);
+
+    try {
+      const session = await startSession({
+        title: sessionTitle,
+        eventType: isSoundcheck ? "soundcheck" : eventType,
+        eventDate,
+        responsibleEngineerName: engineer.trim() || null,
+        devices: activeDeviceId && descriptor ? [{ id: activeDeviceId, name: descriptor.name, driver: descriptor.driver, serialPort: descriptor.serialPort, location: descriptor.location, weighting, response }] : [],
+      });
+      markLateStartProcessed(lateStartPrompt);
+      setTitle(mainTitle);
+      rememberDefaultTitle(mainTitle, eventType, eventDate);
+      setSessionStatistics(null);
+      setMeasurements([]);
+      setActiveSession(session);
+      setMode("live");
+      setLateStartPrompt(null);
+      setNotice(translate(language, "lateStartStarted"));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setLateStartBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (!settings) return;
+    const startTimes = eventTypeStartTimes;
     const today = localDateValue(clock);
     const currentMinutes = clock.getHours() * 60 + clock.getMinutes();
     const startMinutes = (point: AppSettings["startTimes"][number]) => {
       const [hours, minutes] = point.time.split(":").map(Number);
       return hours * 60 + minutes;
     };
-    const processedKey = (point: AppSettings["startTimes"][number]) => `${today}:${point.id}`;
-    const alreadyProcessed = (point: AppSettings["startTimes"][number]) => {
-      const key = processedKey(point);
+    const processedKey = (point: StartTimePoint, eventDate = today) => `${eventDate}:${eventType}:${point.id}`;
+    const alreadyProcessed = (point: StartTimePoint, eventDate = today) => {
+      const key = processedKey(point, eventDate);
       if (processedStartTimes.current.has(key)) return true;
       try {
-        if (window.localStorage.getItem(`sound-monitor:start-time:${key}`) === "done") {
+        const isProcessed = window.localStorage.getItem(`sound-monitor:start-time:${key}`) === "done"
+          || window.localStorage.getItem(`sound-monitor:start-time:${eventDate}:${point.id}`) === "done";
+        if (isProcessed) {
           processedStartTimes.current.add(key);
           return true;
         }
       } catch { /* The in-memory guard still prevents duplicate actions in this run. */ }
       return false;
     };
-    const markProcessed = (point: AppSettings["startTimes"][number]) => {
-      const key = processedKey(point);
+    const markProcessed = (point: StartTimePoint, eventDate = today) => {
+      const key = processedKey(point, eventDate);
       processedStartTimes.current.add(key);
       try { window.localStorage.setItem(`sound-monitor:start-time:${key}`, "done"); } catch { /* The in-memory guard still prevents duplicate actions in this run. */ }
     };
 
-    let scheduled: AppSettings["startTimes"][number] | undefined;
+    let scheduled: StartTimePoint | undefined;
+    let scheduledDate = today;
+    let isLateLaunch = false;
     if (!scheduleInitialized.current) {
       scheduleInitialized.current = true;
-      const duePoints = settings.startTimes.filter((point) => startMinutes(point) <= currentMinutes);
-      scheduled = [...duePoints].reverse().find((point) => point.enabled && !alreadyProcessed(point));
-      // When the app opens late, catch up with only the latest missed active time.
-      // Older points must not then run as extra starts or splits.
-      duePoints.forEach(markProcessed);
+      const cutoff = clock.getTime() - 30 * 60 * 60 * 1_000;
+      const dueOccurrences = [-1, 0].flatMap((dayOffset) => startTimes.map((point) => {
+        const [hours, minutes] = point.time.split(":").map(Number);
+        const started = new Date(clock.getFullYear(), clock.getMonth(), clock.getDate() + dayOffset, hours, minutes);
+        return { point, date: localDateValue(started), started };
+      })).filter(({ started, date }) => started.getTime() <= clock.getTime() && started.getTime() >= cutoff
+        && eventTypeIsActiveOnDate(settings.iniContents, eventType, date))
+        .sort((left, right) => right.started.getTime() - left.started.getTime());
+      const latestOccurrence = dueOccurrences.find(({ point }) => point.enabled);
+      if (latestOccurrence && !alreadyProcessed(latestOccurrence.point, latestOccurrence.date)) {
+        scheduled = latestOccurrence.point;
+        scheduledDate = latestOccurrence.date;
+        // Ask about only the latest missed active time; older points must not run as extra starts or splits.
+        dueOccurrences.filter(({ point, date }) => point.id !== scheduled?.id || date !== scheduledDate)
+          .forEach(({ point, date }) => markProcessed(point, date));
+        isLateLaunch = true;
+      } else {
+        dueOccurrences.forEach(({ point, date }) => markProcessed(point, date));
+      }
     } else {
-      scheduled = settings.startTimes.find((point) => point.enabled && startMinutes(point) === currentMinutes);
-      if (!scheduled || alreadyProcessed(scheduled)) return;
+      scheduled = eventTypeIsActiveOnDate(settings.iniContents, eventType, today)
+        ? startTimes.find((point) => point.enabled && startMinutes(point) === currentMinutes)
+        : undefined;
+      if (!scheduled || alreadyProcessed(scheduled) || lateStartPromptKey.current === processedKey(scheduled)) return;
       markProcessed(scheduled);
     }
     if (!scheduled) return;
 
-    const pointIndex = settings.startTimes.findIndex((point) => point.id === scheduled.id);
+    const pointIndex = startTimes.findIndex((point) => point.id === scheduled.id);
+    if (isLateLaunch) {
+      if (activeSession) {
+        markProcessed(scheduled, scheduledDate);
+        return;
+      }
+      lateStartPromptKey.current = processedKey(scheduled, scheduledDate);
+      setLateStartPrompt({ point: scheduled, index: pointIndex, date: scheduledDate });
+      return;
+    }
     if (activeSession && pointIndex === 0) return;
     const shouldSplit = !!activeSession && pointIndex > 0;
-    const hasLaterPoint = pointIndex === 0 && settings.startTimes.length > 1;
+    const hasLaterPoint = pointIndex === 0 && startTimes.length > 1;
 
     void (async () => {
       try {
@@ -392,7 +453,7 @@ function App() {
         }
 
         const descriptor = devices.find((device) => device.serialPort === selectedPort);
-        const mainTitle = title.trim() || defaultEventTitle(eventType, today, settings, language);
+        const mainTitle = resolveEventTitle(eventType, today);
         const isSoundcheck = hasLaterPoint;
         const soundcheckLabel = settings.classifications.find((item) => item.id === "soundcheck")?.label
           ?? (language === "da" ? "Lydprøve" : "Soundcheck");
@@ -405,7 +466,7 @@ function App() {
           devices: activeDeviceId && descriptor ? [{ id: activeDeviceId, name: descriptor.name, driver: descriptor.driver, serialPort: descriptor.serialPort, location: descriptor.location, weighting, response }] : [],
         });
         setTitle(mainTitle);
-        setDate(today);
+        rememberDefaultTitle(mainTitle, eventType, today);
         setSessionStatistics(null);
         setMeasurements([]);
         setActiveSession(session);
@@ -415,7 +476,7 @@ function App() {
         setError(String(reason));
       }
     })();
-  }, [activeDeviceId, activeSession, clock, date, devices, engineer, eventType, language, refreshArchive, response, selectedPort, settings, title, weighting]);
+  }, [activeDeviceId, activeSession, clock, devices, engineer, eventType, language, refreshArchive, response, selectedPort, settings, title, weighting]);
 
   const openArchive = async () => {
     setMode("archive"); await refreshArchive(!selectedSession);
@@ -435,21 +496,6 @@ function App() {
   const openArchiveSession = async (id: string) => {
     setMode("archive");
     await selectArchiveSession(id);
-  };
-
-  const handleAddMarker = async () => {
-    if (!activeSession || !markerLabel.trim()) return;
-    try {
-      const marker = await addMarker(markerLabel.trim(), markerNote.trim() || null);
-      setActiveSession((session) => session ? {
-        ...session,
-        markers: session.markers.some((current) => current.id === marker.id)
-          ? [...session.markers]
-          : [...session.markers, marker],
-      } : session);
-      setMarkerNote("");
-      setNotice(`${translate(language, "markerAddedPrefix")} ${marker.label}`);
-    } catch (reason) { setError(String(reason)); }
   };
 
   const handlePackageExport = async () => {
@@ -536,28 +582,33 @@ function App() {
   const classificationOptions = classifications.some((classification) => classification.id === eventType)
     ? classifications
     : [...classifications, { id: eventType, label: eventType }];
-  const currentDefaultTitle = defaultEventTitle(eventType, date, settings, language);
   const eventTitle = title.trim() || currentDefaultTitle;
   const soundcheckTitle = settings?.classifications.find((item) => item.id === "soundcheck")?.label
     ?? (language === "da" ? "Lydprøve" : "Soundcheck");
+  const lateStartEventTitle = lateStartPrompt
+    ? lateStartPrompt.index === 0 && eventTypeStartTimes.length > 1
+      ? `${soundcheckTitle} - ${resolveEventTitle(eventType, lateStartPrompt.date)}`
+      : resolveEventTitle(eventType, lateStartPrompt.date)
+    : "";
   const handleSettingsSaved = (updated: AppSettings) => {
     setSettings(updated);
     document.documentElement.lang = updated.language;
   };
   const changeEventType = (nextType: string) => {
-    if (!title.trim() || title.trim() === currentDefaultTitle) {
-      setTitle(defaultEventTitle(nextType, date, settings, language));
+    if (!title.trim() || title.trim() === currentDefaultTitle || title.trim() === defaultTitleRef.current) {
+      const nextDefault = defaultEventTitle(nextType, currentDate, settings, language);
+      setTitle(nextDefault);
+      defaultTitleRef.current = nextDefault;
     }
     setEventType(nextType);
   };
-  const changeDate = (nextDate: string) => {
-    if (!title.trim() || title.trim() === currentDefaultTitle) {
-      setTitle(defaultEventTitle(eventType, nextDate, settings, language));
-    }
-    setDate(nextDate);
-  };
   const locale = localeFor(language);
-  const nextPoint = nextStartTimePoint(activeSession, settings);
+  const nextPoint = nextStartTimePoint(activeSession, eventTypeStartTimes);
+  const nextPointTitle = nextPoint
+    ? nextPoint.index === 0 && eventTypeStartTimes.length > 1
+      ? `${soundcheckTitle} - ${eventTitle}`
+      : eventTitle
+    : "";
   const filteredArchive = archive.filter((session) => `${session.title} ${eventLabels[session.eventType] ?? session.eventType} ${session.responsibleEngineerName ?? ""}`.toLocaleLowerCase(locale).includes(archiveSearch.toLocaleLowerCase(locale)));
   const latest = measurements.at(-1);
   const shortTermLevel = rollingLeq(measurements, 10);
@@ -587,17 +638,23 @@ function App() {
     {mode === "live" ? <main className="workspace">
       <aside className="session-panel">
         <div className="panel-heading"><span className={`record-indicator ${activeSession ? "active" : ""}`} /><div><span className="eyebrow">{translate(language, "session")}</span><h2>{activeSession ? translate(language, "recording") : translate(language, "ready")}</h2></div></div>
-        <label className="field"><span>{translate(language, "title")}</span><input value={title} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setTitle(event.target.value)} disabled={!!activeSession} /></label>
+        <label className="field"><span>{translate(language, "title")}</span><input value={title} onFocus={(event) => event.currentTarget.select()} onChange={(event) => { defaultTitleRef.current = ""; setTitle(event.target.value); }} disabled={!!activeSession} /></label>
         <label className="field"><span>{translate(language, "classification")}</span><select value={eventType} onChange={(event) => changeEventType(event.target.value)} disabled={!!activeSession}>{classificationOptions.map((classification) => <option value={classification.id} key={classification.id}>{classification.label}</option>)}</select></label>
-        <label className="field"><span>{translate(language, "date")}</span><input type="date" value={date} onChange={(event) => changeDate(event.target.value)} disabled={!!activeSession} /></label>
-        <StartTimesPanel settings={settings} eventTitle={eventTitle} soundcheckTitle={soundcheckTitle} language={language} onSaved={handleSettingsSaved} />
+        <StartTimesPanel settings={settings} eventType={eventType} eventTitle={eventTitle} soundcheckTitle={soundcheckTitle} language={language} onSaved={handleSettingsSaved} />
         <label className="field"><span className="field-label-icon"><Users size={14} /> {translate(language, "audioEngineer")}</span><input value={engineer} onChange={(event) => setEngineer(event.target.value)} placeholder={translate(language, "engineerPlaceholder")} disabled={!!activeSession} /></label>
         <div className="session-meta"><span>{translate(language, "start")}</span><strong>{activeSession ? new Date(activeSession.started).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }) : "--:--"}</strong></div>
-        {activeSession && <div className="marker-editor"><div className="marker-editor-title"><Flag size={14} /><span>{translate(language, "marker")}</span><strong>{activeSession.markers.length}</strong></div><div className="marker-input-row"><input list="marker-presets" value={markerLabel} onChange={(event) => setMarkerLabel(event.target.value)} aria-label={translate(language, "markerName")} /><datalist id="marker-presets"><option value={translate(language, "worshipStarts")} /><option value={translate(language, "sermon")} /><option value={translate(language, "video")} /><option value={translate(language, "worshipTwo")} /><option value={translate(language, "announcement")} /><option value={translate(language, "technicalIssue")} /></datalist><button className="icon-button marker-add" type="button" onClick={() => void handleAddMarker()} disabled={!markerLabel.trim()} aria-label={translate(language, "addMarker")} title={translate(language, "addMarker")}><Plus size={16} /></button></div><input className="marker-note" value={markerNote} onChange={(event) => setMarkerNote(event.target.value)} placeholder={translate(language, "optionalNote")} aria-label={translate(language, "markerNote")} /></div>}
-        {activeSession ? <div className="session-actions">
-          <button className="session-button stop" type="button" onClick={() => void toggleSession()}><Square size={16} fill="currentColor" />{translate(language, "stopSession")}</button>
-          <button className="session-button next-point" type="button" onClick={() => void splitSession()} disabled={!nextPoint} aria-label={translate(language, "nextPointAction")} title={translate(language, "nextPointAction")}><Scissors size={16} />{translate(language, "nextPoint")}</button>
-        </div> : <button className="session-button" type="button" onClick={() => void toggleSession()}><Circle size={16} fill="currentColor" />{translate(language, "startSession")}</button>}
+        <div className="session-controls">
+          <button className="session-button" type="button" onClick={() => void toggleSession()}>
+            {activeSession ? <Square size={16} fill="currentColor" /> : <Circle size={16} fill="currentColor" />}
+            {translate(language, activeSession ? "stopSession" : "startSession")}
+          </button>
+          {activeSession && <div className="next-point-control">
+            <button className="session-button next-point" type="button" onClick={() => void splitSession()} disabled={!nextPoint} aria-label={translate(language, "nextPointAction")} title={translate(language, "nextPointAction")}><Scissors size={16} />{translate(language, "splitAndStartNext")}</button>
+            {nextPoint
+              ? <p className="next-point-context"><span>{translate(language, "nextRecording")}</span><strong>{nextPointTitle}</strong><time>{nextPoint.point.time}</time></p>
+              : <p className="next-point-context unavailable">{translate(language, "noNextPointAvailable")}</p>}
+          </div>}
+        </div>
       </aside>
 
       <section className="live-panel">
@@ -637,8 +694,16 @@ function App() {
         {selectedSession ? <><div className="metadata-list"><div><span><Clock3 size={13} /> {translate(language, "duration")}</span><strong>{duration(selectedSession.session.started, selectedSession.session.ended, language)}</strong></div>{selectedSession.session.interrupted && <div className="recovered-session"><span><RefreshCw size={13} /> {translate(language, "status")}</span><strong>{translate(language, "interruptedFull")}</strong></div>}{selectedSession.session.hidden && <div className="hidden-session"><span><EyeOff size={13} /> {translate(language, "status")}</span><strong>{translate(language, "hidden")}</strong></div>}<div><span><Users size={13} /> {translate(language, "audioEngineer")}</span><strong>{selectedSession.session.responsibleEngineerName || translate(language, "notSpecified")}</strong></div><div><span><Cable size={13} /> {translate(language, "devices")}</span><strong>{selectedSession.session.devices.length}</strong></div>{selectedSession.session.devices.map((device) => <div className="device-record" key={device.id}><span>{device.name}</span><strong>dB{device.weighting ?? "?"} · {device.response ?? translate(language, "unknown")}</strong></div>)}</div><div className="marker-list"><div className="marker-list-heading"><Flag size={13} /><span>{translate(language, "markers")}</span><strong>{selectedSession.session.markers.length}</strong></div>{selectedSession.session.markers.map((marker) => <div className="marker-row" key={marker.id}><time>{formatChartTime(marker.timestamp, language)}</time><strong>{marker.label}</strong>{marker.note && <span>{marker.note}</span>}</div>)}{!selectedSession.session.markers.length && <span className="no-markers">{translate(language, "noMarkers")}</span>}</div>{selectedSession.session.hidden ? <button className="archive-session-action restore" type="button" onClick={() => void handleRestore()}><Eye size={15} /> {translate(language, "showSession")}</button> : <button className="archive-session-action" type="button" onClick={() => setHideCandidate(selectedSession.session)}><EyeOff size={15} /> {translate(language, "hide")}</button>}</> : null}
         <div className="library-path"><span>{translate(language, "libraryLocation")}</span><code title={archivePath}>{archivePath || translate(language, "loading")}</code></div>
       </aside>
-    </main> : <StatisticsView language={language} sessions={archive.filter((session) => !session.hidden)} classifications={classifications} onRefresh={async () => { setArchive(await listSessions(false)); }} onOpenSession={openArchiveSession} loadComparison={compareSessions} onExportMeasurements={handleFilteredMeasurementExport} onExportStatistics={handleFilteredStatisticsExport} />}
+    </main> : <Suspense fallback={<main className="statistics-workspace" aria-busy="true"><div className="statistics-empty"><RefreshCw className="spin" size={28} /><span>{translate(language, "loading")}</span></div></main>}><StatisticsView language={language} sessions={archive.filter((session) => !session.hidden)} classifications={classifications} onRefresh={async () => { setArchive(await listSessions(false)); }} onOpenSession={openArchiveSession} loadComparison={compareSessions} onExportMeasurements={handleFilteredMeasurementExport} onExportStatistics={handleFilteredStatisticsExport} /></Suspense>}
     {setupOpen && <SetupDialog settings={settings} archivePath={archivePath} onClose={() => setSetupOpen(false)} onSaved={handleSettingsSaved} />}
+    {lateStartPrompt && <div className="modal-backdrop" role="presentation">
+      <section className="confirm-dialog late-start-dialog" role="dialog" aria-modal="true" aria-labelledby="late-start-dialog-title">
+        <div className="confirm-dialog-header"><div className="hide-icon late-start-icon"><Clock3 size={18} /></div></div>
+        <h2 id="late-start-dialog-title">{translate(language, "lateStartTitle")}</h2>
+        <p>{translate(language, "lateStartPromptBefore")} <strong>{lateStartEventTitle}</strong> {translate(language, "lateStartPromptAt")} <time>{lateStartPrompt.point.time}</time> ({formatDate(lateStartPrompt.date, language)}). {translate(language, "lateStartPromptQuestion")}</p>
+        <div className="confirm-dialog-actions"><button className="cancel-button" type="button" onClick={skipLateStart} disabled={lateStartBusy}>{translate(language, "skipLateStart")}</button><button className="late-start-button" type="button" onClick={() => void confirmLateStart()} disabled={lateStartBusy}>{lateStartBusy ? translate(language, "startingRecording") : translate(language, "startRecordingNow")}</button></div>
+      </section>
+    </div>}
     {hideCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !hideBusy) setHideCandidate(null); }}>
       <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="hide-dialog-title">
         <div className="confirm-dialog-header"><div className="hide-icon"><EyeOff size={18} /></div><button className="icon-button" type="button" onClick={() => setHideCandidate(null)} disabled={hideBusy} aria-label={translate(language, "close")} title={translate(language, "close")}><X size={16} /></button></div>
