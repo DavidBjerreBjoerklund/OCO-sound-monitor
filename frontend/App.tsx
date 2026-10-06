@@ -21,6 +21,7 @@ const StatisticsView = lazy(() => import("./StatisticsView"));
 import { eventTypeIsActiveOnDate, startTimePoints } from "./setupIni";
 import { localeFor, translate, type Language } from "./i18n";
 import { recentMaximum, rollingLeq } from "./liveMetrics";
+import { meterNeedsAttention } from "./meterHealth";
 
 const MAX_CHART_POINTS = 540;
 const RED_ZONE_DB = 90;
@@ -117,6 +118,7 @@ function App() {
   const [devices, setDevices] = useState<DeviceDescriptor[]>([]);
   const [selectedPort, setSelectedPort] = useState("");
   const [activeDeviceId, setActiveDeviceId] = useState<string | null>(null);
+  const lastMeterReading = useRef(Date.now());
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("idle");
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [weighting, setWeighting] = useState<FrequencyWeighting>("A");
@@ -227,6 +229,7 @@ function App() {
 
   const handleDeviceEvent = useCallback((event: DeviceEvent) => {
     if (event.event === "measurement") {
+      lastMeterReading.current = Date.now();
       setMeasurements((current) => [...current.slice(-(MAX_CHART_POINTS - 1)), event.data.measurement]);
     } else if (event.event === "storageError") {
       setError(event.data.message);
@@ -244,6 +247,7 @@ function App() {
   const handleConnect = async () => {
     if (!selectedPort) return;
     try {
+      lastMeterReading.current = Date.now();
       setError(null); setConnectionStatus("connecting");
       if (activeDeviceId) await disconnectDevice(activeDeviceId);
       setActiveDeviceId(await connectDevice({ port: selectedPort, weighting, response }, handleDeviceEvent));
@@ -632,6 +636,7 @@ function App() {
       </nav>
       <div className="topbar-status">{!isDesktopRuntime() && <span className="preview-label">Preview</span>}<span className={`status-dot ${connectionStatus}`} aria-hidden="true" /><span>{statusLabel}</span><time>{formatClock(clock, language)}</time></div>
     </header>
+    {meterNeedsAttention(!!activeSession, !!activeDeviceId, connectionStatus, clock.getTime(), lastMeterReading.current) && <div className="error-banner" role="alert">{translate(language, "meterShutdownWarning")}</div>}
     {error && <div className="error-banner" role="alert">{error}<button type="button" onClick={() => setError(null)} aria-label={translate(language, "closeError")}>×</button></div>}
     {notice && <div className="notice-banner" role="status"><Check size={14} />{notice}<button type="button" onClick={() => setNotice(null)} aria-label={translate(language, "closeMessage")}>×</button></div>}
 
@@ -674,6 +679,7 @@ function App() {
         <div className="port-control"><label className="field grow"><span>{translate(language, "serialPort")}</span><select value={selectedPort} onChange={(event) => setSelectedPort(event.target.value)} disabled={connectionActive}>{devices.length === 0 && <option value="">{translate(language, "noPorts")}</option>}{devices.map((device) => <option key={device.id} value={device.serialPort}>{device.serialPort}</option>)}</select></label><button className="icon-button" type="button" onClick={() => void refreshDevices()} aria-label={translate(language, "reloadPorts")} title={translate(language, "reloadPorts")} disabled={connectionActive}><RefreshCw size={16} /></button></div>
         <fieldset className="control-group" disabled={connectionActive}><legend>{translate(language, "frequencyWeighting")}</legend><div className="segmented four">{(["A", "C", "D", "Z"] as FrequencyWeighting[]).map((value) => <button className={weighting === value ? "active" : ""} type="button" key={value} onClick={() => setWeighting(value)}>{value}</button>)}</div></fieldset>
         <fieldset className="control-group" disabled={connectionActive}><legend>{translate(language, "response")}</legend><div className="segmented">{(["Fast", "Slow"] as TimeWeighting[]).map((value) => <button className={response === value ? "active" : ""} type="button" key={value} onClick={() => setResponse(value)}>{value}</button>)}</div></fieldset>
+        <p className="meter-startup-hint">{translate(language, "meterStartupHint")}</p>
         <div className={`connection-state ${reconnecting ? "reconnecting" : ""}`}>{reconnecting ? <RefreshCw className="spin" size={17} /> : connected ? <Wifi size={17} /> : <WifiOff size={17} />}<div><span>{translate(language, "status")}</span><strong>{statusLabel}</strong></div></div>
         <button className={`connect-button ${connectionActive ? "disconnect" : ""}`} type="button" onClick={() => void (connectionActive ? handleDisconnect() : handleConnect())} disabled={!selectedPort || connectionStatus === "connecting"}>{connectionActive ? <WifiOff size={16} /> : <Plug size={16} />}{connectionActive ? translate(language, "disconnect") : connectionStatus === "connecting" ? translate(language, "connecting") : translate(language, "connect")}</button>
       </aside>

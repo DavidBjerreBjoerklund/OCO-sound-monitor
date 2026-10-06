@@ -1272,6 +1272,13 @@ h2 {
   grid-column: 1;
 }
 
+.meter-startup-hint {
+  margin: 10px 0 0;
+  color: #c5cbbf;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .stats-strip .red-zone-stat small {
   align-self: start;
   padding: 1px 0 0;
