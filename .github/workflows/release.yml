@@ -160,7 +160,7 @@ jobs:
         with:
           path: release-assets
 
-      - name: Create release and upload installers
+      - name: Create or update release with installers
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -174,4 +174,8 @@ jobs:
           if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
             release_args+=(--prerelease)
           fi
-          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" "${release_args[@]}" --repo "${GITHUB_REPOSITORY}"
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" "${release_args[@]}" --repo "${GITHUB_REPOSITORY}"
+          fi

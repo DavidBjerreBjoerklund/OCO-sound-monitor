@@ -25,6 +25,7 @@ import { meterNeedsAttention } from "./meterHealth";
 
 const MAX_CHART_POINTS = 540;
 const RED_ZONE_DB = 90;
+const LATE_START_WINDOW_MS = 30 * 60 * 1_000;
 
 function localDateValue(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -405,7 +406,7 @@ function App() {
     let isLateLaunch = false;
     if (!scheduleInitialized.current) {
       scheduleInitialized.current = true;
-      const cutoff = clock.getTime() - 30 * 60 * 60 * 1_000;
+      const cutoff = clock.getTime() - LATE_START_WINDOW_MS;
       const dueOccurrences = [-1, 0].flatMap((dayOffset) => startTimes.map((point) => {
         const [hours, minutes] = point.time.split(":").map(Number);
         const started = new Date(clock.getFullYear(), clock.getMonth(), clock.getDate() + dayOffset, hours, minutes);
